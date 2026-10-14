@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <Compile Include="Program.txt" />
+    <Compile Include="../../Services/StardewService.cs" Link="StardewService.cs" />
+    <Compile Include="../../Services/StardewModels.cs" Link="StardewModels.cs" />
+    <Compile Include="../../Services/ContentService.cs" Link="ContentService.cs" />
+    <Compile Include="../../Services/ContentModels.cs" Link="ContentModels.cs" />
+    <Compile Include="../../Services/CommunityModels.cs" Link="CommunityModels.cs" />
+    <Compile Include="../../Services/CommunityCatalogService.cs" Link="CommunityCatalogService.cs" />
+    <EmbeddedResource Include="../../Resources/catalog.json" LogicalName="StarSprout.catalog.json" />
+  </ItemGroup>
+</Project>

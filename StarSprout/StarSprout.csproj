@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>StarSprout</AssemblyName>
+    <Product>星芽启动器</Product>
+    <Description>星露谷物语与 SMAPI 启动器</Description>
+    <ApplicationIcon>starsprout.ico</ApplicationIcon>
+    <Version>0.4.0</Version>
+    <DefaultItemExcludes>$(DefaultItemExcludes);verification/**;dist/**;StarSproutData/**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3650.58" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <EmbeddedResource Include="wwwroot\index.html" LogicalName="StarSprout.index.html" />
+    <EmbeddedResource Include="starsprout.ico" LogicalName="StarSprout.icon.ico" />
+    <EmbeddedResource Include="Resources\catalog.json" LogicalName="StarSprout.catalog.json" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,216 @@
+using System.IO.Compression;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using StarSprout.Services;
+
+var root = Path.Combine(AppContext.BaseDirectory, "work-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(root);
+int passed = 0;
+void Check(bool ok, string label) { if (!ok) throw new Exception("FAILED: " + label); passed++; }
+async Task Reject(Func<Task> action, string label) { try { await action(); } catch (Exception ex) when (ex is ArgumentException or InvalidDataException or InvalidOperationException or HttpRequestException) { passed++; return; } throw new Exception("FAILED: " + label); }
+async Task Cancelled(Func<Task> action, string label) { try { await action(); } catch (OperationCanceledException) { passed++; return; } throw new Exception("FAILED: cancellation not propagated: " + label); }
+string Sha(byte[] data) => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+byte[] Zip(string path = "TestMod/manifest.json", bool game = false)
+{
+    using var memory = new MemoryStream();
+    using (var zip = new ZipArchive(memory, ZipArchiveMode.Create, true))
+    {
+        using (var writer = new StreamWriter(zip.CreateEntry(path).Open())) writer.Write("{\"Name\":\"Test Mod\",\"Author\":\"Fixture\",\"Version\":\"1.0.0\",\"UniqueID\":\"Fixture.Test\",\"ContentPackFor\":{\"UniqueID\":\"Pathoschild.ContentPatcher\"}}");
+        using (var writer = new StreamWriter(zip.CreateEntry("TestMod/content.json").Open())) writer.Write("{}");
+        if (game) zip.CreateEntry("Stardew Valley.exe");
+    }
+    return memory.ToArray();
+}
+var bytes = Zip();
+var handler = new Handler((request) => new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
+using var http = new HttpClient(handler);
+using var service = new ContentService(Path.Combine(root, "data"), new StardewService(Path.Combine(root, "settings"), Path.Combine(root, "saves")), http);
+try
+{
+    Check(ContentService.ValidateUrl("https://example.com/mod.zip").Scheme == "https", "public HTTPS");
+    foreach (var url in new[] { "http://example.com/mod.zip", "file:///C:/secret", "https://127.0.0.1/a", "https://10.0.0.1/a", "https://192.168.1.2/a", "https://169.254.169.254/a", "https://[::1]/a", "https://[::ffff:127.0.0.1]/a", "https://localhost/a", "https://host.local/a", "https://example.com:444/a", "https://user:password@example.com/a", "https://example.com/a#x" })
+        await Reject(() => { ContentService.ValidateUrl(url); return Task.CompletedTask; }, "private/non HTTPS URL");
+    var catalog = await service.GetCatalogAsync(true);
+    Check(catalog.Items.Count == 4 && handler.Count == 0, "built-in catalog available without network");
+    Check(catalog.Items.Single(i => i.Id == "content-patcher").CanDownload == false, "no fabricated Content Patcher release");
+    var result = await service.DownloadUrlAsync("https://example.com/mod.zip", Sha(bytes), false);
+    Check(File.Exists(result.Path) && result.Sha256 == Sha(bytes) && !result.Installed, "ZIP download hash and cache only without game");
+    Check(service.GetState().Downloads.Count == 1, "download indexed");
+    var localArchive = Path.Combine(root, "browser-download.zip");
+    File.WriteAllBytes(localArchive, bytes);
+    var localBefore = handler.Count;
+    var browserResult = await service.CacheLocalArchiveAsync(localArchive, "Browser.zip", "https://example.com/mod.zip?auth=private-browser-fixture", false);
+    Check(File.Exists(browserResult.Path) && handler.Count == localBefore, "authenticated browser ZIP cached without second HTTP request");
+    Check(!service.GetState().Downloads.Single(d => d.ItemId == browserResult.ItemId).SourceUrl.Contains("private-browser-fixture"), "browser download temporary credentials absent from metadata");
+    File.WriteAllText(localArchive, "<html>Login page, not a mod</html>");
+    await Reject(() => service.CacheLocalArchiveAsync(localArchive, "Browser.zip", "https://example.com/mod.zip", false), "browser HTML not installed as ZIP");
+    File.WriteAllBytes(localArchive, Zip(game: true));
+    await Reject(() => service.CacheLocalArchiveAsync(localArchive, "Browser.zip", "https://example.com/mod.zip", false), "browser game body not admitted to mod cache");
+    service.SetOffline(true);
+    var before = handler.Count;
+    var cached = await service.DownloadAsync(result.ItemId, false);
+    Check(cached.FromCache && handler.Count == before, "offline cached reuse no requests");
+    await Reject(() => service.DownloadUrlAsync("https://example.com/new.zip", "", false), "offline new download rejected");
+    Check(handler.Count == before, "offline rejection no requests");
+    await Reject(() => service.AddFeedAsync("https://example.com/feed.json"), "offline subscription rejected");
+    var bundle = Path.Combine(root, "offline.zip");
+    await service.ExportOfflineAsync(bundle);
+    using var imported = new ContentService(Path.Combine(root, "imported"), new StardewService(Path.Combine(root, "settings2")), http);
+    imported.SetOffline(true);
+    await imported.ImportOfflineAsync(bundle);
+    var importedResult = await imported.DownloadAsync(result.ItemId, false);
+    Check(importedResult.FromCache && importedResult.Sha256 == result.Sha256 && handler.Count == before, "portable offline import/export");
+    Check((await imported.GetCatalogAsync(true)).Items.Any(i => i.Id == result.ItemId && i.Cached), "imported cache catalog entry");
+    await Reject(() => imported.InstallCached(result.ItemId), "offline cache does not fabricate game installation");
+    File.AppendAllText(importedResult.Path, "tampered");
+    await Reject(() => imported.DownloadAsync(result.ItemId, false), "tampered cache rejected");
+    service.SetOffline(false);
+    await Reject(() => service.DownloadUrlAsync("https://example.com/hash-mismatch.zip", new string('0', 64), false), "expected hash mismatch rejected");
+    Check(!Directory.GetFiles(service.GetState().CacheDirectory, "*.tmp").Any(), "failed download leaves no staging files");
+    handler.Respond = request => new(HttpStatusCode.OK) { Content = new ByteArrayContent(Encoding.UTF8.GetBytes("<html>sharing page</html>")) };
+    await Reject(() => service.DownloadUrlAsync("https://example.com/page.zip", "", false), "share page is not mod ZIP");
+    handler.Respond = request => new(HttpStatusCode.OK) { Content = new ByteArrayContent(Zip("../manifest.json")) };
+    await Reject(() => service.DownloadUrlAsync("https://example.com/traversal.zip", "", false), "ZIP path traversal rejected");
+    handler.Respond = request => new(HttpStatusCode.OK) { Content = new ByteArrayContent(Zip(game: true)) };
+    await Reject(() => service.DownloadUrlAsync("https://example.com/game.zip", "", false), "game package rejected");
+    handler.Respond = request => { var response = new HttpResponseMessage(HttpStatusCode.Redirect); response.Headers.Location = new Uri("https://127.0.0.1/private"); return response; };
+    before = handler.Count;
+    await Reject(() => service.DownloadUrlAsync("https://example.com/redirect.zip", "", false), "private redirect rejected");
+    Check(handler.Count == before + 1, "private redirect never requested");
+    handler.Respond = request => { var response = new HttpResponseMessage(HttpStatusCode.Redirect); response.Headers.Location = new Uri("http://example.com/insecure.zip"); return response; };
+    await Reject(() => service.DownloadUrlAsync("https://example.com/insecure-redirect.zip", "", false), "TLS downgrade rejected");
+    handler.Respond = request => new(HttpStatusCode.OK) { Content = new ByteArrayContent(request.RequestUri!.Host == "api.github.com" ? Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new { tag_name = "v1.0.0", assets = new[] { new { name = "FarmTypeManager.1.0.0.zip", browser_download_url = "https://example.com/author.zip", digest = "sha256:" + Sha(bytes) } } })) : bytes) };
+    var author = await service.DownloadAsync("farm-type-manager", false);
+    Check(author.Sha256 == Sha(bytes) && service.GetState().Downloads.Single(d => d.ItemId == "farm-type-manager").Version == "v1.0.0", "author latest release selected with asset digest");
+    handler.Respond = request => new(HttpStatusCode.OK) { Content = new StringContent("{\"items\":[{\"id\":\"farm-type-manager\",\"name\":\"Untrusted override\",\"kind\":\"pack\",\"downloadUrl\":\"https://example.com/override.zip\"},{\"id\":\"community-pack\",\"name\":\"Fixture community pack\",\"kind\":\"pack\",\"downloadUrl\":\"https://example.com/community.zip\"}]}") };
+    await service.AddFeedAsync("https://example.com/feed.json");
+    var feeds = await service.GetCatalogAsync();
+    Check(feeds.Items.Single(i => i.Id == "farm-type-manager").Name == "Farm Type Manager" && feeds.Items.Any(i => i.Id == "community-pack"), "community feed cannot shadow author catalog");
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    handler.AsyncRespond = async (request, token) => { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, token); return new(HttpStatusCode.OK); };
+    using (var cancel = new CancellationTokenSource())
+    {
+        var refresh = service.GetCatalogAsync(ct: cancel.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        using var waitingCancel = new CancellationTokenSource();
+        waitingCancel.Cancel();
+        await Cancelled(() => service.GetCatalogAsync(true, waitingCancel.Token), "cancel waiting catalog gate");
+        cancel.Cancel();
+        await Cancelled(() => refresh, "cancel active catalog request rather than return warning");
+    }
+    entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    using (var cancel = new CancellationTokenSource())
+    {
+        var add = service.AddFeedAsync("https://example.com/cancelled-feed.json", cancel.Token);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancel.Cancel();
+        await Cancelled(() => add, "cancel feed validation request");
+        Check(!service.GetState().Feeds.Any(f => f.Contains("cancelled-feed")), "cancelled feed is not committed");
+    }
+    handler.AsyncRespond = null;
+    service.SetOffline(true);
+    before = handler.Count;
+    Check((await service.GetCatalogAsync()).Items.Any(i => i.Id == "community-pack") && handler.Count == before, "cached community feed works offline");
+    service.RemoveFeed("https://example.com/feed.json");
+    Check(!(await service.GetCatalogAsync()).Items.Any(i => i.Id == "community-pack"), "removed feed unavailable offline");
+    Check(service.GetState().Downloads.Count == 3 && service.GetState().Downloads.All(d => new[] { result.ItemId, browserResult.ItemId, "farm-type-manager" }.Contains(d.ItemId)), "all rejected downloads absent from cache index");
+    handler.Respond = request => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
+    using (var signed = new ContentService(Path.Combine(root, "signed"), new StardewService(Path.Combine(root, "signed-settings")), http))
+    {
+        const string secret = "private-short-lived-download-token";
+        await signed.DownloadUrlAsync("https://example.com/signed.zip?key=" + secret, null, false);
+        Check(handler.LastUri?.Query.Contains(secret) == true && !JsonConvert.SerializeObject(signed.GetState()).Contains(secret), "full signed URL used for download but not stored in state");
+        var signedBundle = Path.Combine(root, "signed-offline.zip");
+        await signed.ExportOfflineAsync(signedBundle);
+        using var signedZip = ZipFile.OpenRead(signedBundle);
+        using var signedReader = new StreamReader(signedZip.GetEntry("offline-bundle.json")!.Open());
+        Check(!signedReader.ReadToEnd().Contains(secret), "offline bundle excludes signed URL credentials");
+    }
+    byte[] DataZip(params (string Path, string Text)[] entries)
+    {
+        using var memory = new MemoryStream();
+        using (var zip = new ZipArchive(memory, ZipArchiveMode.Create, true))
+            foreach (var entry in entries)
+            { using var writer = new StreamWriter(zip.CreateEntry(entry.Path).Open()); writer.Write(entry.Text); }
+        return memory.ToArray();
+    }
+    var patchBytes = DataZip(("[CP] AloeMilkfish/code/locations.json", "{\"translated\":true}"),
+        ("[CP] AloeMilkfish/i18n/default.json", "{\"name\":\"Fish\"}"), ("[CP] AloeMilkfish/i18n/zh.json", "{\"name\":\"鱼\"}"));
+    var patchGame = Path.Combine(root, "PatchGame"); Directory.CreateDirectory(patchGame);
+    File.WriteAllText(Path.Combine(patchGame, "Stardew Valley.exe"), "unexecuted fixture");
+    var patchTarget = new StardewService(Path.Combine(root, "PatchSettings"), Path.Combine(root, "PatchSaves"));
+    patchTarget.SetGameDirectory(patchGame);
+    const string patchUrl = "https://dmod.3dmgame.com/static/upload/resource2/202609/fixture.zip";
+    var patchHandler = new Handler(request =>
+    {
+        if (request.RequestUri!.Host == "mod.3dmgame.com")
+            return new(HttpStatusCode.OK) { Content = new StringContent(JsonConvert.SerializeObject(new { success = true, data = new {
+                id = 258808, game_id = 10, mods_title = "AloeMilkfish ZH", mods_version = "2026.9.9",
+                mods_resource = new[] { new { mods_resource_name = "汉化.zip", mods_resource_url = patchUrl } }
+            } })) };
+        return new(HttpStatusCode.OK) { Content = new ByteArrayContent(patchBytes) };
+    });
+    using var patchHttp = new HttpClient(patchHandler);
+    using var community = new CommunityCatalogService(http: patchHttp);
+    using var patchContent = new ContentService(Path.Combine(root, "PatchContent"), patchTarget, patchHttp);
+    var patchDetail = await community.GetDetailAsync("3dm", "258808");
+    var attachment = patchDetail.Downloads.First(d => d.CanInstall);
+    Check(attachment.Url == patchUrl && patchDetail.Name == "AloeMilkfish ZH", "3DM public detail resolves installable attachment without browser");
+    string missingBase = "";
+    try { await patchContent.DownloadUrlAsync(attachment.Url, null, true, displayName: patchDetail.Name, version: patchDetail.Version, sourcePageUrl: patchDetail.SourceUrl); }
+    catch (InvalidDataException ex) { missingBase = ex.Message; }
+    Check(missingBase.Contains("需要先安装原版") && missingBase.Contains("文件已缓存"), "translation without base reports required original explicitly");
+    var patchRecord = patchContent.GetState().Downloads.Single();
+    Check(File.Exists(Path.Combine(patchContent.GetState().CacheDirectory, patchRecord.FileName)) && patchRecord.Name == "AloeMilkfish ZH", "failed patch installation retains named offline cache for retry");
+    var baseFolder = Path.Combine(patchGame, "Mods", ".[CP] AloeMilkfish"); Directory.CreateDirectory(baseFolder);
+    var manifestText = "{\"Name\":\"AloeMilkfish\",\"Description\":\"Isolated translation fixture\",\"Author\":\"Fixture\",\"Version\":\"1.0.0\",\"UniqueID\":\"Fixture.Aloe\",\"ContentPackFor\":{\"UniqueID\":\"Pathoschild.ContentPatcher\"}}";
+    File.WriteAllText(Path.Combine(baseFolder, "manifest.json"), manifestText);
+    File.WriteAllText(Path.Combine(baseFolder, "config.json"), "{\"user\":true}");
+    patchContent.SetOffline(true); var patchRequests = patchHandler.Count;
+    var phases = new List<string>(); patchContent.Progress += p => phases.Add(p.Phase);
+    var appliedPatch = await patchContent.InstallCached(patchRecord.ItemId);
+    Check(appliedPatch.Installed && appliedPatch.InstallationResult?.PatchedCount == 1 && patchHandler.Count == patchRequests, "cached translation automatically installs offline once original exists");
+    Check(File.Exists(Path.Combine(baseFolder, "i18n", "zh.json")) && File.ReadAllText(Path.Combine(baseFolder, "manifest.json")) == manifestText && File.ReadAllText(Path.Combine(baseFolder, "config.json")) == "{\"user\":true}", "translation preserves manifest configuration and disabled directory");
+    Check(appliedPatch.InstallationResult!.Mods.Single().Enabled == false && Directory.Exists(appliedPatch.InstallationResult.BackupDirectory), "patch installation keeps disabled state and complete backup");
+    Check(phases.SequenceEqual(new[] { "installing", "completed" }), "cache installation emits installation and completion phases");
+    var repeatedPatch = await patchContent.InstallCached(patchRecord.ItemId);
+    Check(repeatedPatch.InstallationResult?.SkippedCount == 1 && repeatedPatch.InstallationResult.PatchedCount == 0, "repeated translation skips identical data without new overwrite");
+    patchContent.SetOffline(false);
+    foreach (var entry in new[] { ("Aloe/evil.dll", "unexecuted"), ("root.json", "{}"), ("Aloe/config.json", "{}") })
+    {
+        patchHandler.Respond = request => new(HttpStatusCode.OK) { Content = new ByteArrayContent(DataZip(entry)) };
+        await Reject(() => patchContent.DownloadUrlAsync("https://example.com/unsafe-" + Guid.NewGuid() + ".zip", null, false), "unsafe or root or configuration no-manifest package rejected before cache");
+    }
+    Check(patchContent.GetState().Downloads.Count == 1, "rejected translation files never enter cache index");
+    var sampleIndex = Array.IndexOf(args, "--sample");
+    if (sampleIndex >= 0 && sampleIndex + 1 < args.Length)
+    {
+        var sampleGame = Path.Combine(root, "SampleGame"); Directory.CreateDirectory(sampleGame);
+        File.WriteAllText(Path.Combine(sampleGame, "Stardew Valley.exe"), "unexecuted isolated test fixture");
+        var sampleService = new StardewService(Path.Combine(root, "SampleSettings"), Path.Combine(root, "SampleSaves"));
+        sampleService.SetGameDirectory(sampleGame);
+        using var sampleContent = new ContentService(Path.Combine(root, "SampleContent"), sampleService, http);
+        var sampleResult = await sampleContent.CacheLocalArchiveAsync(args[sampleIndex + 1], "Verified-3DM-Mod.zip",
+            "https://dmod.3dmgame.com/static/upload/resource2/202608/_20260827201441_67918.zip", true);
+        Check(sampleResult.Installed && sampleService.GetMods().Count > 0, "verified public community ZIP installs into isolated game");
+        Check(Directory.EnumerateFiles(Path.Combine(sampleGame, "Mods"), "manifest.json", SearchOption.AllDirectories).Any(), "installed public ZIP has its actual mod manifest");
+    }
+    Console.WriteLine($"PASS {passed} content checks");
+}
+finally
+{
+    // Only the generated absolute test folder is removed; never the workspace or user data.
+    if (Path.GetFullPath(root).StartsWith(Path.GetFullPath(AppContext.BaseDirectory), StringComparison.OrdinalIgnoreCase)) Directory.Delete(root, true);
+}
+
+sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+{
+    public int Count { get; private set; }
+    public Uri? LastUri { get; private set; }
+    public Func<HttpRequestMessage, HttpResponseMessage> Respond { get; set; } = respond;
+    public Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? AsyncRespond { get; set; }
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) { Count++; LastUri = request.RequestUri; return AsyncRespond?.Invoke(request, cancellationToken) ?? Task.FromResult(Respond(request)); }
+}

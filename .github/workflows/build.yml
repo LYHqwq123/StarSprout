@@ -1,0 +1,31 @@
+name: Build Windows release
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: microsoft/setup-msbuild@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check interface
+        run: node StarSprout/verification/frontend-checks.cjs
+      - name: Build release packages
+        shell: pwsh
+        run: ./StarSprout/tools/Build-Release.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StarSprout-Windows
+          path: |
+            StarSprout/dist/*-Windows.zip
+            StarSprout/dist/*-Source.zip
+            StarSprout/dist/*-SHA256.txt

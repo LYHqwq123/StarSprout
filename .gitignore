@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+**/dist/
+**/.packages/
+**/StarSproutData/
+**/verification/**/fixtures/
+**/verification/**/fixture-*/
+**/verification/**/work-*/
+**/.vs/
+*.user
+*.suo

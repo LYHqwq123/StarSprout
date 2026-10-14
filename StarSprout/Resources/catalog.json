@@ -1,0 +1,52 @@
+{
+  "items": [
+    {
+      "id": "farm-type-manager",
+      "name": "Farm Type Manager",
+      "author": "Esca-MMC",
+      "description": "地图资源生成框架，部分扩展 MOD 的前置。下载作者发布的完整 ZIP；需要 SMAPI。",
+      "kind": "mod",
+      "sourceUrl": "https://github.com/Esca-MMC/FarmTypeManager/releases",
+      "githubRepository": "Esca-MMC/FarmTypeManager",
+      "assetPrefix": "FarmTypeManager.",
+      "version": "作者最新稳定版",
+      "dependencies": ["SMAPI"],
+      "source": "作者 GitHub"
+    },
+    {
+      "id": "alternative-textures",
+      "name": "Alternative Textures",
+      "author": "PeacefulEnd / Floogen",
+      "description": "家具、建筑与物件材质框架。下载作者发布的完整 ZIP；具体材质包需另装。",
+      "kind": "mod",
+      "sourceUrl": "https://github.com/Floogen/AlternativeTextures/releases",
+      "githubRepository": "Floogen/AlternativeTextures",
+      "assetPrefix": "AlternativeTextures",
+      "version": "作者最新稳定版",
+      "dependencies": ["SMAPI"],
+      "source": "作者 GitHub"
+    },
+    {
+      "id": "tieba-chinese-revision",
+      "name": "贴吧中文修订 MOD",
+      "author": "星露谷物语贴吧汉化组",
+      "description": "校对游戏中文文本与人物对话，作者发布源。转载需联系作者并注明百度星露谷物语吧。",
+      "kind": "mod",
+      "sourceUrl": "https://github.com/svbbs/sv_TiebaChineseRevision/releases",
+      "githubRepository": "svbbs/sv_TiebaChineseRevision",
+      "version": "作者最新稳定版",
+      "dependencies": ["SMAPI", "Pathoschild.ContentPatcher"],
+      "source": "中文社区作者"
+    },
+    {
+      "id": "content-patcher",
+      "name": "Content Patcher",
+      "author": "Pathoschild",
+      "description": "内容包前置。作者仓库目前仅提供源码，请从作者页面获取完整 MOD ZIP 后导入。",
+      "kind": "mod",
+      "sourceUrl": "https://github.com/Pathoschild/StardewMods/tree/develop/ContentPatcher",
+      "dependencies": ["SMAPI"],
+      "source": "作者页面"
+    }
+  ]
+}
