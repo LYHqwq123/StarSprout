@@ -8,6 +8,13 @@ $releaseName = "StarSprout-$version-Windows"
 $release = Join-Path $dist $releaseName
 $stage = Join-Path $dist ('.stage-' + [guid]::NewGuid().ToString('N'))
 $sourceStage = Join-Path $dist ('.source-' + [guid]::NewGuid().ToString('N'))
+function Find-Metadata([string]$Name) {
+    $local = Join-Path $projectRoot $Name
+    if (Test-Path -LiteralPath $local) { return $local }
+    $repositoryFile = Join-Path $sourceRoot $Name
+    if (Test-Path -LiteralPath $repositoryFile) { return $repositoryFile }
+    throw "缺少发布元数据：$Name"
+}
 function Remove-GeneratedDirectory([string]$Target) {
     $absolute = [IO.Path]::GetFullPath($Target)
     $allowed = [IO.Path]::GetFullPath($dist).TrimEnd('\') + '\'
@@ -32,8 +39,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $bootstrapOutput 'StarSprout.exe.config') -Destination $stage
     Remove-GeneratedDirectory $bootstrapOutput
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stage
-    foreach ($notice in @('LICENSE','THIRD-PARTY.md','CHANGELOG.md')) { Copy-Item -LiteralPath (Join-Path $projectRoot $notice) -Destination $stage }
+    foreach ($notice in @('LICENSE','THIRD-PARTY.md','CHANGELOG.md')) { Copy-Item -LiteralPath (Find-Metadata $notice) -Destination $stage }
     Copy-Item -LiteralPath (Join-Path $projectRoot 'Resources\Licenses') -Destination $stage -Recurse
+    New-Item -ItemType Directory -Path (Join-Path $stage 'Resources') | Out-Null
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'Resources') -File -Filter '*.md' | Copy-Item -Destination (Join-Path $stage 'Resources')
     New-Item -ItemType Directory -Path (Join-Path $stage 'runtimes') | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectRoot 'Resources\Runtime-Offline.md') -Destination (Join-Path $stage 'runtimes\README.md')
     Remove-GeneratedDirectory $release
@@ -61,9 +70,13 @@ try {
             }
         }
     }
-    foreach ($metadata in @('README.md','LICENSE','THIRD-PARTY.md','CHANGELOG.md')) { Copy-Item -LiteralPath (Join-Path $projectRoot $metadata) -Destination $sourceStage }
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'Repository\.gitignore') -Destination $sourceStage
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'Repository\.github') -Destination $sourceStage -Recurse
+    foreach ($metadata in @('README.md','LICENSE','THIRD-PARTY.md','CHANGELOG.md')) { Copy-Item -LiteralPath (Find-Metadata $metadata) -Destination $sourceStage }
+    $rootReadme = (Get-Content -LiteralPath (Join-Path $sourceStage 'README.md') -Raw -Encoding UTF8).Replace('(Resources/', '(StarSprout/Resources/')
+    [IO.File]::WriteAllText((Join-Path $sourceStage 'README.md'), $rootReadme, [Text.UTF8Encoding]::new($false))
+    $repositoryMetadata = Join-Path $projectRoot 'Repository'
+    if (-not (Test-Path -LiteralPath $repositoryMetadata)) { $repositoryMetadata = $sourceRoot }
+    Copy-Item -LiteralPath (Join-Path $repositoryMetadata '.gitignore') -Destination $sourceStage
+    Copy-Item -LiteralPath (Join-Path $repositoryMetadata '.github') -Destination $sourceStage -Recurse
     $sourceZip = Join-Path $dist "StarSprout-$version-Source.zip"
     if (Test-Path -LiteralPath $sourceZip) { Remove-Item -LiteralPath $sourceZip -Force }
     [IO.Compression.ZipFile]::CreateFromDirectory($sourceStage, $sourceZip, [IO.Compression.CompressionLevel]::Optimal, $false)

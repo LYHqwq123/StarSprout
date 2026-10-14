@@ -236,8 +236,8 @@ public sealed class NexusService : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.nexusmods.com/v1/" + relative);
         request.Headers.Add("apikey", key);
         request.Headers.Add("Application-Name", "StarSprout");
-        request.Headers.Add("Application-Version", "0.4.0");
-        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.0");
+        request.Headers.Add("Application-Version", "0.4.1");
+        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.1");
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new InvalidOperationException("N网拒绝了访问，请检查 API Key、账号权限和下载授权。");
         if (response.StatusCode == (HttpStatusCode)429) throw new InvalidOperationException("N网请求次数达到限制，请稍后重试。");

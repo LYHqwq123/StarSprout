@@ -9,7 +9,7 @@
     <Product>星芽启动器</Product>
     <Description>星露谷物语与 SMAPI 启动器</Description>
     <ApplicationIcon>starsprout.ico</ApplicationIcon>
-    <Version>0.4.0</Version>
+    <Version>0.4.1</Version>
     <DefaultItemExcludes>$(DefaultItemExcludes);verification/**;dist/**;StarSproutData/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>

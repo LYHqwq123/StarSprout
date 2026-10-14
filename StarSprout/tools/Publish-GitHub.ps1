@@ -53,25 +53,28 @@ if (-not $repo) {
 }
 if ($repo.owner.login -cne $Owner -or -not $repo.permissions.push) { throw '目标仓库不属于当前账号或没有写权限。' }
 $remote="https://$Owner@github.com/$Owner/$Repository.git"
-if ($repo.size -gt 0) {
-    & git clone --depth 1 $remote $publishDirectory
+$remoteBranches=@(& git ls-remote --heads $remote)
+if ($LASTEXITCODE -ne 0) { throw '读取远程分支失败，未改动 GitHub。' }
+if ($remoteBranches.Count -gt 0) {
+    & git clone --quiet --depth 1 $remote $publishDirectory
     if ($LASTEXITCODE -ne 0) { throw '拉取目标仓库失败。' }
 } else {
     New-Item -ItemType Directory -Path $publishDirectory | Out-Null
-    & git init -b main $publishDirectory | Out-Null
+    & git init --quiet -b main $publishDirectory | Out-Null
     & git -C $publishDirectory remote add origin $remote
 }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [IO.Compression.ZipFile]::ExtractToDirectory($sourceZip,$publishDirectory,$true)
 & git -C $publishDirectory config user.name $Owner
 & git -C $publishDirectory config user.email "$($account.id)+$Owner@users.noreply.github.com"
+& git -C $publishDirectory config core.autocrlf false
 & git -C $publishDirectory add --all
 & git -C $publishDirectory diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
-    & git -C $publishDirectory commit -m "Release StarSprout $version"
+    & git -C $publishDirectory commit --quiet -m "Release StarSprout $version"
     if ($LASTEXITCODE -ne 0) { throw '创建发布提交失败。' }
 }
-& git -C $publishDirectory push -u origin HEAD:main
+& git -C $publishDirectory push --quiet -u origin HEAD:main
 if ($LASTEXITCODE -ne 0) { throw '源码推送失败，未创建 Release。' }
 $releaseBody=@{
     tag_name="v$version";target_commitish='main';name="星芽启动器 StarSprout $version"

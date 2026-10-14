@@ -402,7 +402,7 @@ public sealed class ContentService : IDisposable
         {
             EnsureOnline();
             using var request = new HttpRequestMessage(HttpMethod.Get, current);
-            request.Headers.UserAgent.ParseAdd("StarSprout/0.4.0");
+            request.Headers.UserAgent.ParseAdd("StarSprout/0.4.1");
             var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
             if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
             {

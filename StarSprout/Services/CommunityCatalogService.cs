@@ -160,7 +160,7 @@ public sealed class CommunityCatalogService : IDisposable
         // Every endpoint is constructed locally. No user-supplied URL, cookie, or key is sent.
         using var request = new HttpRequestMessage(body is null ? HttpMethod.Get : HttpMethod.Post, url);
         request.Headers.Accept.ParseAdd("application/json");
-        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.0");
+        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.1");
         if (body is not null) request.Content = new StringContent(JsonConvert.SerializeObject(body), Encoding.UTF8, "application/json");
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
