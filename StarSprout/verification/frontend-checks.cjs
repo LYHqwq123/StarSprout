@@ -5,10 +5,30 @@ const html=fs.readFileSync(require('path').join(__dirname,'../wwwroot/index.html
 const script=html.match(/<script>([\s\S]*?)<\/script>/)[1];
 const elements=new Map(),events=new Map(),requests=[];
 const element=id=>elements.get(id)||elements.set(id,{innerHTML:'',textContent:'',className:'',scrollTop:0,dataset:{},style:{setProperty(name,value){this[name]=value}},listeners:{},classList:{toggle(){},add(){},remove(){}},setAttribute(name,value){this[name]=value},addEventListener(name,callback){(this.listeners[name]||=([])).push(callback)},focus(){},setSelectionRange(){}}).get(id);
-const nav=['home','mods','downloads','offline','saves','logs','appearance','settings','about'].map(page=>({...element('nav-'+page),dataset:{page}}));
+const nav=['home','mods','downloads','guides','multiplayer','offline','saves','logs','appearance','settings','about'].map(page=>({...element('nav-'+page),dataset:{page}}));
+// Model an inert parsed DOM independently of the reader's reconstruction rules.
+// The real HTML parser and live BWIKI article are also exercised by --guide-test.
+const domText=value=>({nodeType:3,textContent:value});
+const domNode=(tag,attributes={},...children)=>({nodeType:1,tagName:tag.toUpperCase(),childNodes:children.map(value=>typeof value==='string'?domText(value):value),getAttribute(name){return attributes[name]??null}});
+const guideMarkup='fixture: independently constructed wiki DOM';
+const guideDom=[domNode('h2',{id:'农场概览',onclick:'bad()'},'农场概览'),domNode('p',{style:'background:url(https://evil.test/track)'},'中文正文 ',domNode('strong',{},'种植指南')),domNode('script',{},'window.chrome.webview.postMessage({action:"removeMod"})'),domNode('iframe',{src:'https://evil.test'}),domNode('svg',{onload:'bad()'},domNode('script',{},'bad()')),domNode('form',{},domNode('button',{'data-feature':'removeMod'},'malicious control')),domNode('div',{id:'content','data-feature':'removeMod','data-action':'close',onclick:'bad()'},'safe div'),domNode('table',{},domNode('tbody',{},domNode('tr',{},domNode('td',{colspan:'2',style:'bad'},'作物表格')))),domNode('a',{href:'/stardewvalley/钓鱼#鱼类'},'鱼类链接'),domNode('a',{href:'javascript:bad()'},'dangerous link'),domNode('a',{href:'https://evil.test/track'},'external link'),domNode('img',{src:'https://patchwiki.biligame.com/images/stardewvalley/3/3f/farm.png',width:'40',alt:'农场图',onerror:'bad()',srcset:'https://evil.test/pixel 2x'}),domNode('img',{src:'https://evil.test/track.png'}),domNode('img',{src:'data:image/svg+xml,bad'}),domNode('img',{src:'https://patchwiki.biligame.com/images/stardewvalley/map.svg'}),domNode('img',{src:'https://patchwiki.biligame.com:8443/images/stardewvalley/map.png'})];
+function inertTemplate(){return {content:{childNodes:[]},set innerHTML(value){this.content.childNodes=value===guideMarkup?guideDom:[]}};}
 const fixture={installation:{hasGame:true,hasSmapi:true,gameVersion:'1.6.15',smapiVersion:'4.1.0'},settings:{gameDirectory:'D:\\Game',useSmapi:true},mods:[],saves:[],log:'[ERROR SMAPI] fixture',running:false,content:{offline:false,feeds:[],downloads:[{itemId:'example',name:'Example',version:'1.0.0',size:1024}]},offlineGame:{installation:{hasGame:true,hasSmapi:true,gameVersion:'1.6.15',smapiVersion:'4.1.0'},settings:{gameDirectory:'D:\\OfflineGame',useSmapi:false}},analysis:{endpoint:'https://api.deepseek.com',model:'fixture',hasApiKey:true,sendLog:true,sendModList:true,provider:'deepseek',activeProfileId:'deepseek-main',compactLog:true,maxInputChars:12000,logKeywords:'ERROR,WARN',profiles:[{id:'deepseek-main',name:'日常诊断',provider:'deepseek',endpoint:'https://api.deepseek.com',model:'fixture',hasApiKey:true},{id:'qwen-main',name:'备选连接',provider:'qwen',endpoint:'https://dashscope.aliyuncs.com/compatible-mode/v1',model:'fixture-qwen',hasApiKey:true}]},nexus:{connected:true,username:'Fixture',isPremium:true,applicationId:'',hasApiKey:true}};
 fixture.appearance={theme:'light',accent:'#5588eb',blur:0,opacity:85,fit:'cover',overlay:true,panelOpacity:80,hasBackground:false,backgroundUrl:'',backgroundName:''};fixture.window={maximized:false};fixture.modTroubleshooting={canRestore:true,disabledCount:0};
+fixture.guides={favorites:[],recent:[],cacheCount:0};
+fixture.multiplayer={coreInstalled:false,coreVersion:'',status:'idle',role:'',invitationCode:'',virtualIp:'',joinAddress:'',peerCount:0,peers:[],notice:'',error:'',running:false,logs:[]};
 function mockResponse(request){
+  if(request.action==='multiplayerInstallCore'){Object.assign(fixture.multiplayer,{coreInstalled:true,coreVersion:'2.3.2',notice:'联机核心已准备好。'});return fixture;}
+  if(request.action==='multiplayerCreate'){Object.assign(fixture.multiplayer,{status:'hosting',role:'host',invitationCode:'SG1.fixture',virtualIp:'10.126.0.1',joinAddress:'',peerCount:0,peers:[],notice:'房间已创建，等待好友加入。',error:'',running:true,logs:['Fixture host core started']});return fixture;}
+  if(request.action==='multiplayerJoin'){Object.assign(fixture.multiplayer,{status:'connected',role:'guest',invitationCode:request.payload.code,virtualIp:'10.126.12.34',joinAddress:'127.0.0.1',peerCount:1,peers:[{hostname:'Fixture host',virtualIp:'10.126.0.1',latencyMs:18,connectionType:'p2p'}],notice:'已发现房主，请在游戏中加入 127.0.0.1。',error:'',running:true,logs:['Fixture guest connected']});return fixture;}
+  if(request.action==='multiplayerRefresh'){fixture.multiplayer.notice='联机状态已刷新。';fixture.multiplayer.logs.push('Fixture native status queried');return fixture;}
+  if(request.action==='multiplayerStop'){const {coreInstalled,coreVersion,logs}=fixture.multiplayer;fixture.multiplayer={coreInstalled,coreVersion,status:'idle',role:'',invitationCode:'',virtualIp:'',joinAddress:'',peerCount:0,peers:[],notice:'已退出联机房间。',error:'',running:false,logs};return fixture;}
+  if(['multiplayerCopyCode','multiplayerCopyAddress','multiplayerSource'].includes(request.action))return true;
+  if(request.action==='setLaunchPlatform'){const platform=request.payload.platform;fixture.launchProfile={platform,displayName:{steam:'Steam',xbox:'Xbox',offline:'离线游玩'}[platform],description:'客户端当前登录账号',canOpenClient:platform!=='offline'};fixture.content.offline=platform==='offline';return fixture;}
+  if(request.action==='guideSearch')return {query:request.payload.query,page:request.payload.page,hasMore:request.payload.page===1,items:[{title:'农场 <img src=x>',summary:'攻略 <script>bad()</script>',sourceUrl:'https://wiki.biligame.com/stardewvalley/农场'}],fromCache:fixture.content.offline,notice:fixture.content.offline?'本地结果':''};
+  if(request.action==='guideArticle'){fixture.guides.recent=[{title:request.payload.title,sourceUrl:'https://wiki.biligame.com/stardewvalley/'+request.payload.title}];fixture.guides.cacheCount=1;return {title:request.payload.title,html:guideMarkup,sections:[{title:'农场概览',anchor:'农场概览',level:2}],sourceUrl:'https://wiki.biligame.com/stardewvalley/'+request.payload.title,lastUpdated:'2026-10-14T00:00:00Z',cachedAt:'2026-10-14T01:00:00Z',license:'CC BY-NC-SA 3.0',fromCache:fixture.content.offline,notice:fixture.content.offline?'离线缓存':''};}
+  if(request.action==='guideState')return fixture.guides;
+  if(request.action==='guideFavorite'){fixture.guides.favorites=fixture.guides.favorites.filter(item=>item.title!==request.payload.title);if(request.payload.favorite)fixture.guides.favorites.push({title:request.payload.title});return fixture.guides;}
   if(request.action==='nexusCatalog')return {category:request.payload.category,query:request.payload.query,page:request.payload.page,pageSize:24,total:58,hasMore:request.payload.page<3,notice:'Official API fixture',items:[{modId:1915,name:'Content <img src=x> Patcher',author:'Pathoschild',version:'2.0.0',summary:'<script>bad()</script>',downloads:12345}]};
   if(request.action==='getNexusMod')return {modId:1915,name:'Content Patcher',author:'Pathoschild',version:'2.0.0',description:'Description <script>unsafe</script>',sourceUrl:'https://www.nexusmods.com/stardewvalley/mods/1915',files:[{fileId:123,name:'Current ZIP',version:'2.0.0',fileName:'mod.zip',categoryName:'MAIN',isZip:true,available:true,canDownload:fixture.nexus.connected&&fixture.nexus.isPremium,size:4096},{fileId:124,name:'RAR file',isZip:false,available:true,canDownload:false,categoryName:'OPTIONAL'},{fileId:125,name:'Archived ZIP',isZip:true,available:false,canDownload:false,categoryName:'ARCHIVED'}]};
   if(request.action==='downloadCommunity'){
@@ -41,15 +61,15 @@ function mockResponse(request){
   }
   return request.action==='snapshot'?fixture:true;
 }
-let receive,holdCommunityDownload=false,heldCommunityRequest=null;
+let receive,holdCommunityDownload=false,heldCommunityRequest=null,holdMultiplayerAction='',heldMultiplayerRequest=null;
 const media={matches:false,listeners:[],addEventListener(name,callback){this.listeners.push(callback)}};
-const context=vm.createContext({console,URL,FormData:class{constructor(form){this.values=form.values||{}}get(name){return this.values[name]??null}},setInterval(){},setTimeout(){return 0},clearTimeout(){},window:{matchMedia:()=>media,chrome:{webview:{addEventListener(type,callback){receive=callback},postMessage(request){requests.push(request);if(holdCommunityDownload&&request.action==='downloadCommunity'){heldCommunityRequest=request;return;}queueMicrotask(()=>receive({data:{id:request.id,result:mockResponse(request)}}))}}}},document:{documentElement:element('html'),hidden:false,activeElement:null,getElementById:element,querySelectorAll:()=>nav,querySelector:()=>element('main'),addEventListener(name,callback){if(!events.has(name))events.set(name,[]);events.get(name).push(callback)}}});
+const context=vm.createContext({console,URL,FormData:class{constructor(form){this.values=form.values||{}}get(name){return this.values[name]??null}},setInterval(){},setTimeout(){return 0},clearTimeout(){},window:{matchMedia:()=>media,chrome:{webview:{addEventListener(type,callback){receive=callback},postMessage(request){requests.push(request);if(holdCommunityDownload&&request.action==='downloadCommunity'){heldCommunityRequest=request;return;}if(holdMultiplayerAction&&request.action===holdMultiplayerAction){heldMultiplayerRequest=request;return;}queueMicrotask(()=>receive({data:{id:request.id,result:mockResponse(request)}}))}}}},document:{documentElement:element('html'),hidden:false,activeElement:null,getElementById:element,querySelectorAll:()=>nav,querySelector:()=>element('main'),createElement(name){assert.equal(name,'template');return inertTemplate();},addEventListener(name,callback){if(!events.has(name))events.set(name,[]);events.get(name).push(callback)}}});
 vm.runInContext(script,context);
 (async()=>{
   await new Promise(resolve=>setImmediate(resolve));
   let count=0;
   const check=(value,label)=>{assert(value,label);count++;console.log('PASS: '+label)};
-  for(const page of ['home','mods','downloads','offline','saves','logs','appearance','settings','about']){context.window.app.showPage(page);check(element('content').innerHTML.length>200,'render '+page)}
+  for(const page of ['home','mods','downloads','guides','multiplayer','offline','saves','logs','appearance','settings','about']){context.window.app.showPage(page);check(element('content').innerHTML.length>200,'render '+page)}
   await new Promise(resolve=>setImmediate(resolve));
   check(requests.every(r=>['snapshot','catalogCached'].includes(r.action)),'rendering pages only reads local snapshots and cached catalog');
   check(requests.filter(r=>r.action==='catalogCached').length===1,'resource navigation reads local built-in catalog once');
@@ -270,5 +290,165 @@ vm.runInContext(script,context);
   check(requests.at(-1).action==='getNexusMod'&&requests.at(-1).payload.url===lookupForm.values.modId,'pasted Nexus URL loads native API details rather than browser');
   vm.runInContext("detailItem=null;state.content.offline=true;render()",context);
   check(/data-form="nexusCatalog"[\s\S]*?class="button primary"[^>]*disabled/.test(element('content').innerHTML),'offline mode blocks Nexus API searches');
+  vm.runInContext('state.content.offline=false;guideArticle=null;guideResults=null',context);
+  const beforeGuideNavigation=requests.length;context.window.app.showPage('guides');
+  check(requests.length===beforeGuideNavigation&&element('content').innerHTML.includes('农场生活，随手查阅'),'guide navigation shows native categories without any network request');
+  check(html.includes('data-page="guides"')&&element('content').innerHTML.includes('data-form="guideSearch"'),'sidebar links to a real searchable guide page');
+  const guideSearchForm={dataset:{form:'guideSearch'},values:{query:' 钓鱼 '},closest(){return this}};
+  await dispatch('submit',{target:guideSearchForm,preventDefault(){}});
+  check(requests.at(-1).action==='guideSearch'&&requests.at(-1).payload.query==='钓鱼'&&requests.at(-1).payload.page===1,'guide search trims input and requests BWIKI API through native host');
+  check(element('content').innerHTML.includes('&lt;img src=x&gt;')&&element('content').innerHTML.includes('&lt;script&gt;bad()')&&!element('content').innerHTML.includes('<script>bad()'),'guide search titles and snippets remain escaped text');
+  await clickFeature('guideSearchPage',{resultPage:'2'});
+  check(requests.at(-1).action==='guideSearch'&&requests.at(-1).payload.page===2&&element('content').innerHTML.includes('第 2 页'),'guide pagination uses explicit API result page');
+  await clickFeature('guideArticle',{title:'农场'});
+  check(requests.slice(-2).map(item=>item.action).join(',')==='guideArticle,guideState'&&element('content').innerHTML.includes('中文正文')&&element('content').innerHTML.includes('作物表格'),'opening a guide reads native article and updates local reading history');
+  const safeHtml=context.sanitizeGuideHtml(guideMarkup);
+  check(!/<script|<iframe|<svg|<form|<button|onclick|onerror|srcset|style=|data-feature|data-action|javascript:|evil\.test/i.test(safeHtml),'article reconstruction strips scripts bridge controls remote tracking and source attributes');
+  check(safeHtml.includes('<table>')&&safeHtml.includes('colspan="2"')&&safeHtml.includes('<strong>种植指南</strong>'),'reader preserves semantic table and text formatting');
+  check(safeHtml.includes('id="guide-anchor-')&&!safeHtml.includes('id="content"')&&safeHtml.includes('data-guide-title="钓鱼"'),'headings are isolated from host IDs and internal article links become controlled navigation');
+  check((safeHtml.match(/<img /g)||[]).length===1&&safeHtml.includes('https://guides.starsprout.local/image?url=')&&!safeHtml.includes('src="https://patchwiki.'),'only approved raster images render through offline-aware native proxy');
+  check(element('content').innerHTML.includes('文章目录')&&element('content').innerHTML.includes('CC BY-NC-SA 3.0')&&element('content').innerHTML.includes('已简化排版')&&element('content').innerHTML.includes('作者与修订历史'),'reader shows contents source licensing modification notice and author history access');
+  await clickFeature('guideFavorite',{title:'农场',favorite:'true'});
+  check(requests.at(-1).action==='guideFavorite'&&requests.at(-1).payload.favorite===true&&vm.runInContext('state.guides.favorites[0].title',context)==='农场'&&element('content').innerHTML.includes('取消收藏'),'favorite persists through native local state and updates reader immediately');
+  await clickFeature('guideFavorite',{title:'农场',favorite:'false'});
+  check(vm.runInContext('state.guides.favorites.length',context)===0,'unfavorite removes exact saved article');
+  await clickFeature('guideSource',{title:'农场'});
+  check(requests.at(-1).action==='guideSource'&&requests.at(-1).payload.title==='农场'&&!('url' in requests.at(-1).payload),'source button sends a known wiki title instead of arbitrary browser URL');
+  await clickFeature('guideHistory',{title:'农场'});
+  check(requests.at(-1).action==='guideHistory'&&requests.at(-1).payload.title==='农场','author attribution opens trusted original revision history');
+  const link={dataset:{guideTitle:'钓鱼',guideAnchor:'鱼类'}};
+  await dispatch('click',{target:{closest(selector){return selector==='.guide-body [data-guide-title]'?link:null}},preventDefault(){}});
+  check(requests.findLast(item=>item.action==='guideArticle').payload.title==='钓鱼','article link loads its target inside native reader');
+  const imageProxy=context.guideImageProxy('https://patchwiki.biligame.com/images/stardewvalley/3/3f/farm.png');
+  const image={getAttribute(name){return name==='src'?imageProxy:'农场图'}};
+  const beforeImage=requests.length;
+  await dispatch('click',{target:{closest(selector){return selector==='.guide-body img[data-guide-image]'?image:null}},preventDefault(){}});
+  check(requests.length===beforeImage&&element('guideImageModal').innerHTML.includes('长图可滚动查看')&&element('guideImageModal').innerHTML.includes('guides.starsprout.local'),'clicking an article image opens scrollable native overlay without external browser');
+  await clickFeature('guideImageClose');const beforeLinkedImage=requests.length;
+  const imageLink={dataset:{guideTitle:'文件:Farm.png'}};
+  await dispatch('click',{target:{closest(selector){return selector==='.guide-body img[data-guide-image]'?image:selector==='.guide-body [data-guide-title]'?imageLink:null}},preventDefault(){}});
+  check(requests.length===beforeLinkedImage&&element('guideImageModal').innerHTML.includes('长图可滚动查看'),'image wrapped in a wiki file link opens zoom instead of requesting the file article');
+  await clickFeature('guideImageZoom',{step:'25'});
+  check(element('guideImageModal').innerHTML.includes('125%')&&element('guideImageModal').innerHTML.includes('width:125%'),'image zoom enlarges displayed image with a bounded scale');
+  await clickFeature('guideImageOriginal');check(element('guideImageModal').innerHTML.includes('原图')&&!element('guideImageModal').innerHTML.includes('width:125%'),'image can switch to original pixel dimensions');
+  await clickFeature('guideImageRetry');check(element('guideImageModal').innerHTML.includes('&retry='),'failed image can retry its native proxy request');
+  await dispatch('keydown',{key:'Escape'});check(element('guideImageModal').innerHTML==='','Escape closes enlarged image');
+  vm.runInContext('state.content.offline=true;render()',context);const offlineSource=requests.length;
+  await clickFeature('guideHome');await clickFeature('guideSource',{title:'农场'});await clickFeature('guideLicense');
+  check(requests.length===offlineSource,'offline guide reader never launches external source or license pages');
+  await clickFeature('guideArticle',{title:'农场'});
+  check(element('content').innerHTML.includes('本地缓存')&&element('content').innerHTML.includes('离线缓存'),'offline guide requests show locally cached article state');
+  await clickFeature('guideBack');
+  check(element('content').innerHTML.includes('当前为离线模式')&&element('content').innerHTML.includes('最近阅读'),'returning from reader retains local history and offline entry points');
+  check(context.safeGuideLink(null)===null&&context.safeGuideLink('')===null&&context.safeGuideLink('   ')===null,'missing or empty wiki links never become fake self-navigation');
+  fixture.launchProfiles=[{id:'steam',name:'Steam'},{id:'xbox',name:'Xbox'},{id:'offline',name:'离线游玩'}];
+  fixture.launchProfile={platform:'offline',displayName:'离线游玩',description:'独立本地游戏',canOpenClient:false};
+  fixture.playtime={totalSeconds:7380,todaySeconds:1500,currentSessionSeconds:300,lastSessionSeconds:600,isRunning:false,platform:'offline'};
+  context.accept(fixture);context.window.app.showPage('home');const homeMarkup=element('content').innerHTML;
+  check(homeMarkup.includes('class="home-activity"')&&homeMarkup.includes('class="panel home-calendar"')&&homeMarkup.includes('class="panel home-playtime"'),'homepage pairs compact calendar with playtime panel in responsive row');
+  check(homeMarkup.includes('2 小时 3 分钟')&&homeMarkup.includes('25 分钟')&&homeMarkup.includes('5 分钟')&&homeMarkup.includes('10 分钟'),'playtime shows native cumulative today current and previous session durations');
+  check(context.playtimeDuration(0)==='0 分钟'&&context.playtimeDuration(45)==='不足 1 分钟'&&context.playtimeDuration(-3)==='0 分钟'&&context.playtimeDuration(Infinity)==='0 分钟','time formatting handles empty short negative and invalid durations without fabricated hours');
+  const timeRequests=requests.length;context.renderPlaytime();context.renderPlaytime();
+  check(requests.length===timeRequests&&vm.runInContext('state.playtime.totalSeconds',context)===7380,'rendering playtime never increments history or requests platform account data');
+  check(homeMarkup.includes('id="launchPlatformSelect"')&&homeMarkup.includes('>Steam</option>')&&homeMarkup.includes('>Xbox</option>')&&homeMarkup.includes('>离线游玩</option>'),'homepage startup account selector provides Steam Xbox and offline profiles');
+  check(!homeMarkup.includes('data-feature="openLaunchClient"')&&homeMarkup.includes('独立本地游戏，无需平台账号'),'offline profile explains local play and has no client sign-in action');
+  await dispatch('change',{target:{id:'launchPlatformSelect',value:'steam'}});
+  check(requests.at(-1).action==='setLaunchPlatform'&&requests.at(-1).payload.platform==='steam'&&vm.runInContext('state.launchProfile.platform',context)==='steam','startup selector saves exact Steam platform through native host and accepts refreshed profile');
+  check(element('content').innerHTML.includes('Steam 库启动设置')&&element('content').innerHTML.includes('Steam/Xbox 使用客户端当前登录账号'),'Steam vanilla mode reflects library launch options and client-owned authentication');
+  await clickFeature('openLaunchClient');
+  check(requests.at(-1).action==='openLaunchClient'&&Object.keys(requests.at(-1).payload).length===0,'client login button requests fixed official client action without passwords or arbitrary URL');
+  await dispatch('change',{target:{id:'launchPlatformSelect',value:'xbox'}});
+  check(requests.at(-1).action==='setLaunchPlatform'&&requests.at(-1).payload.platform==='xbox'&&element('content').innerHTML.includes('打开 Xbox 客户端')&&element('content').innerHTML.includes('Xbox 客户端设置'),'Xbox selection updates client sign-in button and preserves official client launch settings');
+  const invalidProfile=requests.length;await dispatch('change',{target:{id:'launchPlatformSelect',value:'untrusted'}});
+  check(requests.length===invalidProfile,'platform selector rejects unknown values before native request');
+  vm.runInContext('state.playtime.isRunning=true;render()',context);const activeProfile=requests.length;
+  await dispatch('change',{target:{id:'launchPlatformSelect',value:'offline'}});
+  check(requests.length===activeProfile&&/id="launchPlatformSelect"[^>]*disabled/.test(element('content').innerHTML)&&element('content').innerHTML.includes('正在记录'),'tracked active game locks profile selector and shows live recording state');
+  vm.runInContext('state.playtime.isRunning=false;render()',context);
+  await dispatch('change',{target:{id:'launchPlatformSelect',value:'offline'}});
+  check(requests.at(-1).payload.platform==='offline'&&vm.runInContext('state.content.offline',context),'offline profile accepts native network-offline state');
+  vm.runInContext('state.playtime=undefined;render()',context);
+  check(element('content').innerHTML.includes('id="playtimeTotal">0 分钟')&&element('content').innerHTML.includes('不包含 Steam/Xbox 的既往游玩历史'),'empty playtime starts at zero and clearly limits records to launcher tracking');
+  vm.runInContext("busy=true;activeTask='launch';downloadProgress={phase:'launching',name:'Steam <img src=x> 登录后自动记录'};renderProgress()",context);
+  check(element('taskProgress').innerHTML.includes('正在等待游戏启动')&&element('taskProgress').innerHTML.includes('&lt;img src=x&gt;')&&element('taskProgress').innerHTML.includes('data-feature="cancelTask"'),'official client launch wait displays escaped status and accessible cancel button');
+  await clickFeature('cancelTask');check(requests.at(-1).action==='cancelTask'&&vm.runInContext('busy',context),'waiting for official game startup can be cancelled while launch operation is busy');
+  vm.runInContext("activeTask='launchOffline';downloadProgress=null;renderProgress()",context);
+  check(element('taskProgress').innerHTML.includes('正在等待游戏启动')&&element('taskProgress').innerHTML.includes('data-feature="cancelTask"'),'offline game startup also exposes waiting progress and cancellation');
+  vm.runInContext("activeTask='guideSearch';renderProgress()",context);
+  check(element('taskProgress').innerHTML.includes('正在搜索 BWIKI')&&element('taskProgress').innerHTML.includes('data-feature="cancelTask"'),'BWIKI search shows source-specific progress with cancellation');
+  vm.runInContext("activeTask='guideArticle';renderProgress()",context);
+  check(element('taskProgress').innerHTML.includes('正在读取图文攻略')&&element('taskProgress').innerHTML.includes('data-feature="cancelTask"'),'BWIKI article fetch shows cancellable illustrated-content progress');
+  vm.runInContext("busy=false;activeTask='';downloadProgress=null;renderProgress()",context);
+  context.window.app.showPage('offline');
+  check(element('content').innerHTML.includes('<h2>本地离线游戏</h2>')&&element('content').innerHTML.includes('选择本地游戏目录')&&element('content').innerHTML.includes('启动离线游戏')&&!/GOG|data-kind="gog"/.test(element('content').innerHTML),'offline game page uses existing local-game actions and removes obsolete storefront shortcut');
+  await clickFeature('chooseOfflineGame');
+  check(requests.at(-1).action==='chooseOfflineGame','local offline game chooser retains native folder-selection behavior without game download');
+  const payloadIs=(request,expected)=>{try{assert.deepEqual(JSON.parse(JSON.stringify(request?.payload)),expected);return true;}catch{return false;}};
+  const multiplayerForm=(action,values)=>({dataset:{form:action},values,closest(){return this}});
+  const multiplayerSubmit=(action,values)=>dispatch('submit',{target:multiplayerForm(action,values),preventDefault(){}});
+  const multiplayerFormHtml=action=>element('content').innerHTML.match(new RegExp('<form\\b[^>]*data-form="'+action+'"[\\s\\S]*?</form>'))?.[0]||'';
+  const featureAvailable=feature=>{const tag=element('content').innerHTML.match(new RegExp('<button\\b(?=[^>]*data-feature="'+feature+'")[^>]*>'))?.[0];return !!tag&&!/\bdisabled\b/.test(tag)};
+  async function holdMultiplayer(action,begin,expectedPayload,phase){
+    holdMultiplayerAction=action;heldMultiplayerRequest=null;const completion=begin();
+    await new Promise(resolve=>setImmediate(resolve));
+    check(heldMultiplayerRequest?.action===action&&payloadIs(heldMultiplayerRequest,expectedPayload),action+' sends only the explicit native payload');
+    check(vm.runInContext('busy&&activeTask==='+JSON.stringify(action),context),action+' owns the active busy operation while native work is pending');
+    receive({data:{type:'progress',progress:{phase,name:'Fixture <img src=x>'}}});
+    const progress=element('taskProgress').innerHTML;
+    check(progress.includes('联机')&&progress.includes('&lt;img src=x&gt;')&&!progress.includes('<img src=x>')&&progress.includes('data-feature="cancelTask"'),action+' renders escaped multiplayer progress with cancellation');
+    return {completion,request:heldMultiplayerRequest};
+  }
+  async function finishMultiplayer(operation,result){
+    holdMultiplayerAction='';heldMultiplayerRequest=null;
+    receive({data:{id:operation.request.id,result:result===undefined?mockResponse(operation.request):result}});
+    await operation.completion;
+    check(vm.runInContext('!busy&&!activeTask',context)&&element('taskProgress').innerHTML==='',operation.request.action+' clears busy and progress after the native response');
+  }
+  const beforeMultiplayerNavigation=requests.length;context.window.app.showPage('multiplayer');
+  check(requests.length===beforeMultiplayerNavigation&&html.includes('data-page="multiplayer"'),'multiplayer navigation renders local state without installing or starting a core');
+  check(multiplayerFormHtml('multiplayerCreate').includes('name="nickname"')&&multiplayerFormHtml('multiplayerJoin').includes('name="nickname"')&&multiplayerFormHtml('multiplayerJoin').includes('name="code"'),'native multiplayer page provides separate host and invitation join forms');
+  check(vm.runInContext('state.content.offline&&state.launchProfile.platform==="offline"',context)&&featureAvailable('multiplayerInstallCore'),'offline game profile and resource offline mode leave explicit multiplayer installation available');
+  check(/\bdisabled\b/.test(multiplayerFormHtml('multiplayerCreate'))&&/\bdisabled\b/.test(multiplayerFormHtml('multiplayerJoin')),'host and join stay unavailable until the core is explicitly installed');
+  await clickFeature('multiplayerSource',{url:'https://untrusted.example/',text:'untrusted'});
+  check(requests.at(-1).action==='multiplayerSource'&&payloadIs(requests.at(-1),{}),'multiplayer credits use a fixed native source action even in resource offline mode');
+  let multiplayerOperation=await holdMultiplayer('multiplayerInstallCore',()=>clickFeature('multiplayerInstallCore'),{},'preparingMultiplayer');
+  await clickFeature('cancelTask');
+  check(requests.at(-1).action==='cancelTask'&&payloadIs(requests.at(-1),{})&&vm.runInContext('busy',context),'multiplayer core setup accepts cancellation while its native request remains pending');
+  await finishMultiplayer(multiplayerOperation,{cancelled:true});
+  check(!vm.runInContext('state.multiplayer.coreInstalled',context),'cancelled installation never invents an installed multiplayer core');
+  await clickFeature('multiplayerInstallCore');
+  check(requests.at(-1).action==='multiplayerInstallCore'&&payloadIs(requests.at(-1),{})&&vm.runInContext('state.multiplayer.coreInstalled',context)&&element('content').innerHTML.includes('2.3.2'),'explicit installation accepts the full native snapshot and displays the installed core version');
+  check(!/\bdisabled\b/.test(multiplayerFormHtml('multiplayerCreate'))&&!/\bdisabled\b/.test(multiplayerFormHtml('multiplayerJoin')),'installed core enables host and join despite the offline game and resource settings');
+  multiplayerOperation=await holdMultiplayer('multiplayerCreate',()=>multiplayerSubmit('multiplayerCreate',{nickname:'  Fixture host  '}),{nickname:'Fixture host'},'connectingMultiplayer');
+  const blockedMultiplayer=requests.length;
+  await multiplayerSubmit('multiplayerJoin',{nickname:'Other guest',code:'SG1.fixture'});await clickFeature('multiplayerRefresh');
+  check(requests.length===blockedMultiplayer&&/\bdisabled\b/.test(multiplayerFormHtml('multiplayerCreate'))&&/\bdisabled\b/.test(multiplayerFormHtml('multiplayerJoin')),'pending room creation disables duplicate forms and rejects competing multiplayer actions');
+  await finishMultiplayer(multiplayerOperation);
+  check(vm.runInContext('state.multiplayer.running&&state.multiplayer.role==="host"&&state.multiplayer.status==="hosting"',context)&&element('content').innerHTML.includes('SG1.fixture')&&element('content').innerHTML.includes('10.126.0.1'),'room creation renders the actual host invitation and virtual IP from the snapshot');
+  check(/\bdisabled\b/.test(multiplayerFormHtml('multiplayerCreate'))&&/\bdisabled\b/.test(multiplayerFormHtml('multiplayerJoin')),'an active room prevents creating or joining another room');
+  await clickFeature('multiplayerCopyCode',{code:'untrusted code',text:'untrusted text'});
+  check(requests.at(-1).action==='multiplayerCopyCode'&&payloadIs(requests.at(-1),{}),'copy invitation delegates to native room state without accepting DOM text');
+  await clickFeature('multiplayerStop');
+  check(requests.at(-1).action==='multiplayerStop'&&payloadIs(requests.at(-1),{})&&vm.runInContext('!state.multiplayer.running&&state.multiplayer.status==="idle"&&!state.multiplayer.invitationCode&&!state.multiplayer.virtualIp&&state.multiplayer.coreInstalled',context),'leaving a hosted room accepts native idle state while retaining the installed core');
+  const invalidInvitation=requests.length;
+  await multiplayerSubmit('multiplayerJoin',{nickname:'Fixture guest',code:'https://untrusted.example/'});
+  check(requests.length===invalidInvitation,'join validation rejects an arbitrary URL before sending a native invitation request');
+  multiplayerOperation=await holdMultiplayer('multiplayerJoin',()=>multiplayerSubmit('multiplayerJoin',{code:'  SG1.fixture  ',nickname:'  Fixture guest  '}),{code:'SG1.fixture',nickname:'Fixture guest'},'connectingMultiplayer');
+  await finishMultiplayer(multiplayerOperation);
+  check(vm.runInContext('state.multiplayer.running&&state.multiplayer.role==="guest"&&state.multiplayer.status==="connected"&&state.multiplayer.joinAddress==="127.0.0.1"',context)&&element('content').innerHTML.includes('127.0.0.1')&&element('content').innerHTML.includes('Fixture host'),'joining accepts native connection status and displays the game address and discovered host');
+  await clickFeature('multiplayerCopyAddress',{address:'untrusted address',text:'untrusted text'});
+  check(requests.at(-1).action==='multiplayerCopyAddress'&&payloadIs(requests.at(-1),{}),'copy game address uses the native active room instead of a DOM supplied address');
+  multiplayerOperation=await holdMultiplayer('multiplayerRefresh',()=>clickFeature('multiplayerRefresh'),{},'preparingMultiplayer');
+  await finishMultiplayer(multiplayerOperation);
+  check(element('content').innerHTML.includes('联机状态已刷新。')&&element('content').innerHTML.includes('Fixture native status queried'),'explicit multiplayer refresh accepts updated notice and diagnostic logs');
+  const originalMultiplayer=fixture.multiplayer;
+  fixture.multiplayer={...originalMultiplayer,invitationCode:'SG1.<img src=x>',virtualIp:'virtual <img src=x>',joinAddress:'address <img src=x>',notice:'notice <img src=x>',error:'error <script>bad()</script>',peers:[{hostname:'peer <img src=x>',virtualIp:'peer-ip <img src=x>',latencyMs:18,connectionType:'relay <img src=x>'}],logs:['log <script>bad()</script>']};
+  context.accept(fixture);const multiplayerMarkup=element('content').innerHTML;
+  for(const [field,escaped] of [['virtual IP','virtual &lt;img src=x&gt;'],['game address','address &lt;img src=x&gt;'],['notice','notice &lt;img src=x&gt;'],['error','error &lt;script&gt;bad()&lt;/script&gt;'],['peer name','peer &lt;img src=x&gt;'],['peer IP','peer-ip &lt;img src=x&gt;'],['peer route','relay &lt;img src=x&gt;'],['log','log &lt;script&gt;bad()&lt;/script&gt;']])check(multiplayerMarkup.includes(escaped),'multiplayer '+field+' is rendered as escaped text');
+  check(!multiplayerMarkup.includes('<img src=x>')&&!multiplayerMarkup.includes('<script>bad()'),'multiplayer diagnostics never create HTML from native or peer supplied strings');
+  fixture.multiplayer.role='host';context.accept(fixture);
+  check(element('content').innerHTML.includes('SG1.&lt;img src=x&gt;')&&!element('content').innerHTML.includes('SG1.<img src=x>'),'host invitation is rendered as escaped text in its read only field');
+  fixture.multiplayer=originalMultiplayer;context.accept(fixture);await clickFeature('multiplayerStop');
+  check(requests.at(-1).action==='multiplayerStop'&&vm.runInContext('!state.multiplayer.running&&!state.multiplayer.joinAddress&&state.multiplayer.peers.length===0',context),'leaving a guest room clears its address and peer list using native state');
   console.log(count+' frontend checks passed without a live game or API service.');
 })().catch(error=>{console.error(error);process.exitCode=1});

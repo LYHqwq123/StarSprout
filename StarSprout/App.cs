@@ -11,7 +11,7 @@ public sealed class App : Application
         var args = Environment.GetCommandLineArgs();
         var nxm = args.Skip(1).FirstOrDefault(a => a.StartsWith("nxm://", StringComparison.OrdinalIgnoreCase));
         using var singleton = new Mutex(true, NxmIntegration.MutexName, out var first);
-        if (!first && !args.Contains("--smoke") && !args.Contains("--drag-test") && !args.Contains("--browser-test") && !args.Contains("--appearance-test"))
+        if (!first && !args.Contains("--smoke") && !args.Contains("--drag-test") && !args.Contains("--browser-test") && !args.Contains("--appearance-test") && !args.Contains("--guide-test"))
         {
             if (nxm is not null) NxmIntegration.SendAsync(nxm).GetAwaiter().GetResult();
             return;
@@ -30,7 +30,7 @@ public sealed class App : Application
     private static void ReportError(Exception exception)
     {
         var args = Environment.GetCommandLineArgs();
-        var check = Array.FindIndex(args, a => a is "--smoke" or "--drag-test" or "--browser-test" or "--appearance-test");
+        var check = Array.FindIndex(args, a => a is "--smoke" or "--drag-test" or "--browser-test" or "--appearance-test" or "--guide-test");
         if (check >= 0 && check + 1 < args.Length)
         {
             Directory.CreateDirectory(args[check + 1]);

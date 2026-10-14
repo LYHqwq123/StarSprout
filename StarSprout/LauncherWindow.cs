@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shell;
+using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using Microsoft.Win32;
@@ -23,21 +24,32 @@ public sealed class LauncherWindow : Window
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly StardewService service;
     private readonly StardewService offlineGame;
+    private readonly StardewService xboxGame;
     private readonly ContentService contentService;
     private readonly LogAnalysisService analysis;
     private readonly NexusService nexus;
     private readonly AppearanceService appearance;
     private readonly HomeService home;
     private readonly SmapiDownloadService smapiDownloads;
+    private readonly GuideService guides;
+    private readonly GuideImageCache guideImages;
+    private readonly PlaytimeService playtime;
+    private readonly LaunchProfileService launchProfiles;
+    private readonly MultiplayerCoreStore multiplayerCore;
+    private readonly MultiplayerService multiplayer;
+    private readonly DispatcherTimer playtimeTimer = new() { Interval = TimeSpan.FromSeconds(15) };
+    private readonly object playtimeObservation = new();
+    private readonly CancellationTokenSource guideLifetime = new();
     private int? calendarYear, calendarMonth;
     private string launchWarning = "";
     private readonly CommunityCatalogService communities;
-    private readonly ModTroubleshootingService normalModState, offlineModState;
+    private readonly ModTroubleshootingService normalModState, offlineModState, xboxModState;
     private readonly Dictionary<long, string> pendingNexusInstalls = new();
     private bool maximized;
     private string operationNotice = "";
     private ModInstallResult? installationResult;
     private readonly bool appearanceCheck = Environment.GetCommandLineArgs().Contains("--appearance-test");
+    private readonly bool guideCheck = Environment.GetCommandLineArgs().Contains("--guide-test");
     private CancellationTokenSource? currentOperation;
     private ContentCatalog? lastCatalog;
     private readonly bool smokeCheck = Environment.GetCommandLineArgs().Contains("--smoke");
@@ -59,15 +71,23 @@ public sealed class LauncherWindow : Window
         WindowChrome.SetWindowChrome(this, new WindowChrome { CaptionHeight = 0, ResizeBorderThickness = new Thickness(6), GlassFrameThickness = new Thickness(0) });
         using (var icon = Assembly.GetExecutingAssembly().GetManifestResourceStream("StarSprout.icon.ico"))
             if (icon != null) Icon = BitmapFrame.Create(icon, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
-        var testSaves = appearanceCheck ? Path.Combine(data, "TestProfile", "Saves") : null;
+        var testSaves = appearanceCheck || guideCheck ? Path.Combine(data, "TestProfile", "Saves") : null;
         service = new StardewService(Path.Combine(data, "Settings"), testSaves);
         offlineGame = new StardewService(Path.Combine(data, "OfflineGame"), testSaves);
+        xboxGame = new StardewService(Path.Combine(data, "XboxGame"), testSaves);
         contentService = new ContentService(Path.Combine(data, "Content"), service);
+        launchProfiles = new LaunchProfileService(Path.Combine(data, "LaunchProfiles"), contentService.GetState().Offline ? "offline" : "steam");
+        contentService.SetOffline(launchProfiles.GetState().Platform == "offline");
+        playtime = new PlaytimeService(Path.Combine(data, "Playtime"));
         analysis = new LogAnalysisService(Path.Combine(data, "AI"), service);
         nexus = new NexusService(Path.Combine(data, "Nexus"), contentService);
         appearance = new AppearanceService(Path.Combine(data, "Appearance"));
         home = new HomeService(Path.Combine(data, "Home"));
         smapiDownloads = new SmapiDownloadService(Path.Combine(data, "SMAPI"));
+        guides = new GuideService(Path.Combine(data, "Guides"));
+        guideImages = new GuideImageCache(Path.Combine(data, "Guides"));
+        multiplayerCore = new MultiplayerCoreStore(Path.Combine(data, "Multiplayer"));
+        multiplayer = new MultiplayerService(Path.Combine(data, "Multiplayer"), multiplayerCore);
         smapiDownloads.Progress += progress => Dispatcher.BeginInvoke(() =>
         {
             if (!closing) browser.CoreWebView2?.PostWebMessageAsJson(JsonConvert.SerializeObject(new { type = "progress", progress }, jsonSettings));
@@ -75,6 +95,8 @@ public sealed class LauncherWindow : Window
         communities = new CommunityCatalogService(Path.Combine(data, "Communities"));
         normalModState = new ModTroubleshootingService(service, Path.Combine(data, "Settings"));
         offlineModState = new ModTroubleshootingService(offlineGame, Path.Combine(data, "OfflineGame"));
+        xboxModState = new ModTroubleshootingService(xboxGame, Path.Combine(data, "XboxGame"));
+        playtimeTimer.Tick += (_, _) => ObservePlaytime();
         nexus.OpenLoginPage = url => OpenCommunityLink(url);
         StateChanged += (_, _) =>
         {
@@ -90,14 +112,14 @@ public sealed class LauncherWindow : Window
         });
         Content = browser;
         Loaded += Initialize;
-        Closed += (_, _) => { closing = true; currentOperation?.Cancel(); browser.Dispose(); game?.Dispose(); contentService.Dispose(); analysis.Dispose(); nexus.Dispose(); communities.Dispose(); smapiDownloads.Dispose(); };
+        Closed += (_, _) => { closing = true; playtimeTimer.Stop(); ObservePlaytime(); currentOperation?.Cancel(); guideLifetime.Cancel(); multiplayer.Dispose(); multiplayerCore.Dispose(); browser.Dispose(); game?.Dispose(); contentService.Dispose(); analysis.Dispose(); nexus.Dispose(); communities.Dispose(); smapiDownloads.Dispose(); guides.Dispose(); guideImages.Dispose(); guideLifetime.Dispose(); };
     }
 
     private async void Initialize(object sender, RoutedEventArgs e)
     {
         var arguments = Environment.GetCommandLineArgs();
         var smoke = Array.IndexOf(arguments, "--smoke");
-        if (smoke >= 0 || arguments.Contains("--browser-test") || appearanceCheck) { ShowInTaskbar = false; Left = -8000; }
+        if (smoke >= 0 || arguments.Contains("--browser-test") || appearanceCheck || guideCheck) { ShowInTaskbar = false; Left = -8000; }
         var ui = Path.Combine(data, "Ui");
         Directory.CreateDirectory(ui);
         using (var input = Assembly.GetExecutingAssembly().GetManifestResourceStream("StarSprout.index.html")!)
@@ -112,13 +134,17 @@ public sealed class LauncherWindow : Window
         core.SetVirtualHostNameToFolderMapping("starsprout.local", ui, CoreWebView2HostResourceAccessKind.DenyCors);
         core.SetVirtualHostNameToFolderMapping("appearance.starsprout.local", appearance.AssetsDirectory, CoreWebView2HostResourceAccessKind.Allow);
         core.SetVirtualHostNameToFolderMapping("home.starsprout.local", home.AssetsDirectory, CoreWebView2HostResourceAccessKind.Allow);
+        core.AddWebResourceRequestedFilter("https://guides.starsprout.local/*", CoreWebView2WebResourceContext.All);
+        core.WebResourceRequested += GuideImageRequested;
         core.WebMessageReceived += Receive;
         core.NewWindowRequested += (_, ev) => { ev.Handled = true; };
         core.NavigationStarting += (_, ev) =>
         {
             if (!ev.Uri.StartsWith("https://starsprout.local/", StringComparison.OrdinalIgnoreCase)) ev.Cancel = true;
         };
-        if (!appearanceCheck && !contentService.GetState().Offline && string.IsNullOrWhiteSpace(service.Settings.GameDirectory))
+        RecoverPlaytime();
+        playtimeTimer.Start();
+        if (!appearanceCheck && !guideCheck && launchProfiles.GetState().Platform == "steam" && string.IsNullOrWhiteSpace(service.Settings.GameDirectory))
         {
             var folders = await Task.Run(service.DetectGameFolders);
             if (folders.Count > 0) service.SetGameDirectory(folders[0]);
@@ -127,7 +153,13 @@ public sealed class LauncherWindow : Window
         var dragCheck = Array.IndexOf(arguments, "--drag-test");
         var browserCheck = Array.IndexOf(arguments, "--browser-test");
         var themeCheck = Array.IndexOf(arguments, "--appearance-test");
-        if (themeCheck >= 0 && themeCheck + 1 < arguments.Length)
+        var guideTest = Array.IndexOf(arguments, "--guide-test");
+        if (guideTest >= 0 && guideTest + 1 < arguments.Length)
+        {
+            for (var i = 0; i < 50 && await core.ExecuteScriptAsync("Boolean(window.appReady)") != "true"; i++) await Task.Delay(100);
+            await GuideSmoke.Run(browser, arguments[guideTest + 1]); Close();
+        }
+        else if (themeCheck >= 0 && themeCheck + 1 < arguments.Length)
         {
             for (var i = 0; i < 50 && await core.ExecuteScriptAsync("Boolean(window.appReady)") != "true"; i++) await Task.Delay(100);
             await AppearanceSmoke.Run(this, browser, appearance, arguments[themeCheck + 1]); Close();
@@ -199,18 +231,106 @@ public sealed class LauncherWindow : Window
         }
     }
 
+    private async void GuideImageRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        var deferral = e.GetDeferral();
+        try
+        {
+            var uri = new Uri(e.Request.Uri);
+            if (e.Request.Method != "GET" || uri.Scheme != "https" || uri.Host != "guides.starsprout.local" ||
+                !uri.IsDefaultPort || uri.AbsolutePath != "/image" || !uri.Query.StartsWith("?url=", StringComparison.Ordinal))
+                throw new ArgumentException("无效的攻略图片地址。");
+            guideImages.Offline = contentService.GetState().Offline;
+            var encodedUrl = uri.Query[5..].Split('&', 2)[0];
+            var image = await guideImages.GetAsync(Uri.UnescapeDataString(encodedUrl), guideLifetime.Token);
+            if (!closing)
+                e.Response = browser.CoreWebView2.Environment.CreateWebResourceResponse(new MemoryStream(image.Bytes, false), 200, "OK",
+                    "Content-Type: " + image.ContentType + "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: https://starsprout.local\r\n");
+        }
+        catch (Exception)
+        {
+            if (!closing)
+                e.Response = browser.CoreWebView2.Environment.CreateWebResourceResponse(new MemoryStream(Array.Empty<byte>()), 404, "Unavailable", "Content-Type: text/plain\r\nCache-Control: no-store\r\n");
+        }
+        finally
+        {
+            try { deferral.Complete(); }
+            catch (Exception ex) when (closing && ex is ObjectDisposedException or InvalidOperationException or System.Runtime.InteropServices.COMException) { }
+        }
+    }
+
     private async Task<object?> Perform(string action, JObject payload, CancellationToken ct)
     {
+        ObservePlaytime();
         var active = ActiveGame();
         contentService.SetInstallation(active);
         analysis.SetInstallation(active);
         communities.Offline = contentService.GetState().Offline;
+        guides.Offline = contentService.GetState().Offline;
+        guideImages.Offline = guides.Offline;
         if (IsRunning() && (action is "toggleMod" or "setModsEnabled" or "disableAllMods" or "restoreModState" or "removeMod" or "importMod" or "installCached" ||
             action is "downloadContent" or "downloadUrl" or "downloadNexus" or "downloadCommunity" && payload.Value<bool>("install")))
             throw new InvalidOperationException("请先退出游戏，再安装或调整 Mod；下载到缓存仍可进行。");
         switch (action)
         {
-            case "snapshot": return await Snapshot();
+            case "snapshot":
+                if (multiplayer.GetState().Running) await multiplayer.RefreshAsync(ct);
+                return await Snapshot();
+            case "multiplayerInstallCore":
+                // This explicit multiplayer action also works with an independently owned offline game.
+                multiplayer.DownloadsOffline = false;
+                ReportTaskProgress("preparingMultiplayer", "EasyTier 联机核心 · 首次下载约 31 MB");
+                await multiplayer.InstallCoreAsync(ct);
+                return await Snapshot();
+            case "multiplayerCreate":
+                ReportTaskProgress("connectingMultiplayer", "正在创建星芽联机房间");
+                await multiplayer.CreateRoomAsync(payload.Value<string>("nickname") ?? "", ct);
+                return await Snapshot();
+            case "multiplayerJoin":
+                ReportTaskProgress("connectingMultiplayer", "正在连接房主");
+                await multiplayer.JoinRoomAsync(payload.Value<string>("code") ?? "", payload.Value<string>("nickname") ?? "", ct);
+                return await Snapshot();
+            case "multiplayerRefresh": await multiplayer.RefreshAsync(ct); return await Snapshot();
+            case "multiplayerStop": await multiplayer.StopAsync(ct); return await Snapshot();
+            case "multiplayerCopyCode":
+                var invitation = multiplayer.GetState().InvitationCode;
+                if (string.IsNullOrWhiteSpace(invitation)) throw new InvalidOperationException("请先创建联机房间。");
+                Clipboard.SetText(invitation);
+                return true;
+            case "multiplayerCopyAddress":
+                var joinAddress = multiplayer.GetState().JoinAddress;
+                if (string.IsNullOrWhiteSpace(joinAddress)) throw new InvalidOperationException("请先加入联机房间。");
+                Clipboard.SetText(joinAddress);
+                return true;
+            case "multiplayerSource": OpenUrl("https://github.com/EasyTier/EasyTier"); return true;
+            case "setLaunchPlatform":
+                if (IsRunning()) throw new InvalidOperationException("请先退出游戏，再切换启动账号。");
+                var selectedProfile = launchProfiles.SetPlatform(payload.Value<string>("platform") ?? "");
+                SetNetworkOffline(selectedProfile.Platform == "offline");
+                return await Snapshot();
+            case "openLaunchClient":
+                using (var clientProcess = Process.Start(LaunchProfileService.GetClientStartInfo(launchProfiles.GetState().Platform))) { }
+                return true;
+            case "guideState": return guides.GetState();
+            case "guideSearch": return await guides.SearchAsync(payload.Value<string>("query") ?? "", payload.Value<int?>("page") ?? 1, ct);
+            case "guideArticle": return await guides.GetArticleAsync(payload.Value<string>("title") ?? "", ct);
+            case "guideFavorite": return guides.SetFavorite(payload.Value<string>("title") ?? "", payload.Value<bool>("favorite"));
+            case "guideSource":
+                if (guides.Offline) throw new InvalidOperationException("离线模式下无法打开攻略原站。");
+                OpenUrl(GuideService.SourceUrl(payload.Value<string>("title") ?? ""));
+                return true;
+            case "guideHistory":
+                if (guides.Offline) throw new InvalidOperationException("离线模式下无法打开攻略原站。");
+                OpenUrl(GuideService.SourceUrl(payload.Value<string>("title") ?? "") + "?action=history");
+                return true;
+            case "guideLicense":
+                if (guides.Offline) throw new InvalidOperationException("离线模式下无法打开内容许可。");
+                OpenUrl("https://creativecommons.org/licenses/by-nc-sa/3.0/deed.zh-hans");
+                return true;
+            case "guideHome":
+                if (guides.Offline) throw new InvalidOperationException("离线模式下无法打开攻略原站。");
+                OpenUrl("https://wiki.biligame.com/stardewvalley/");
+                return true;
             case "downloadSmapi":
                 smapiDownloads.Offline = contentService.GetState().Offline;
                 var smapiPackage = await smapiDownloads.DownloadAsync(payload.Value<string>("source") ?? "domestic", ct);
@@ -238,9 +358,10 @@ public sealed class LauncherWindow : Window
                 return await Snapshot();
             case "detectGame":
                 if (contentService.GetState().Offline) throw new InvalidOperationException("独立版请使用「选择游戏目录」，自动检测用于游戏库中的已安装游戏。");
-                var folders = await Task.Run(service.DetectGameFolders);
+                var folders = await Task.Run(active.DetectGameFolders);
+                if (launchProfiles.GetState().Platform == "xbox") folders = folders.Where(path => path.Contains("XboxGames", StringComparison.OrdinalIgnoreCase) || path.Contains("ModifiableWindowsApps", StringComparison.OrdinalIgnoreCase)).ToList();
                 if (folders.Count == 0) throw new InvalidOperationException("没有找到游戏，请手动选择安装文件夹。");
-                service.SetGameDirectory(folders[0]);
+                active.SetGameDirectory(folders[0]);
                 return await Snapshot();
             case "setMode":
                 active.Settings.UseSmapi = payload.Value<bool>("useSmapi");
@@ -248,8 +369,7 @@ public sealed class LauncherWindow : Window
                 return await Snapshot();
             case "launch":
                 if (IsRunning()) throw new InvalidOperationException("游戏正在运行。");
-                game = await Task.Run(() => active.Launch(payload.Value<bool>("useSmapi")), ct);
-                runningGameDirectory = active.Settings.GameDirectory;
+                await LaunchSelectedGame(active, launchProfiles.GetState().Platform, payload.Value<bool>("useSmapi"), ct);
                 RecordLaunchDay(payload.Value<string>("accent"));
                 return await Snapshot();
             case "importMod":
@@ -305,10 +425,8 @@ public sealed class LauncherWindow : Window
             case "installCached": SetDownloadNotice(await contentService.InstallCached(payload.Value<string>("itemId") ?? "", ct)); return await Snapshot();
             case "setOffline":
                 if (IsRunning()) throw new InvalidOperationException("请先退出游戏，再切换离线目录。");
-                contentService.SetOffline(payload.Value<bool>("offline"));
-                smapiDownloads.Offline = payload.Value<bool>("offline");
-                communities.Offline = payload.Value<bool>("offline");
-                if (payload.Value<bool>("offline")) pendingNexusInstalls.Clear();
+                launchProfiles.SetPlatform(payload.Value<bool>("offline") ? "offline" : launchProfiles.GetState().Platform == "xbox" ? "xbox" : "steam");
+                SetNetworkOffline(payload.Value<bool>("offline"));
                 return await Snapshot();
             case "exportOffline":
                 var export = new SaveFileDialog { Title = "导出已下载的离线 Mod 包", Filter = "离线包 (*.zip)|*.zip", FileName = "StarSprout-Offline-Mods.zip" };
@@ -319,13 +437,14 @@ public sealed class LauncherWindow : Window
                 if (import.ShowDialog(this) == true) await contentService.ImportOfflineAsync(import.FileName, ct);
                 return await Snapshot();
             case "chooseOfflineGame":
-                var offlineFolder = new OpenFolderDialog { Title = "选择独立版 / GOG 游戏目录", InitialDirectory = offlineGame.Settings.GameDirectory };
+                var offlineFolder = new OpenFolderDialog { Title = "选择本地离线游戏目录", InitialDirectory = offlineGame.Settings.GameDirectory };
                 if (offlineFolder.ShowDialog(this) == true) offlineGame.SetGameDirectory(offlineFolder.FolderName);
                 return await Snapshot();
             case "launchOffline":
                 if (IsRunning()) throw new InvalidOperationException("游戏正在运行。");
-                game = await Task.Run(() => offlineGame.Launch(payload.Value<bool>("useSmapi")), ct);
-                runningGameDirectory = offlineGame.Settings.GameDirectory;
+                launchProfiles.SetPlatform("offline");
+                SetNetworkOffline(true);
+                await LaunchSelectedGame(offlineGame, "offline", payload.Value<bool>("useSmapi"), ct);
                 RecordLaunchDay(payload.Value<string>("accent"));
                 return await Snapshot();
             case "saveAnalysis": analysis.SaveSettings(payload.ToObject<AnalysisSettingsInput>()!); return await Snapshot();
@@ -368,13 +487,12 @@ public sealed class LauncherWindow : Window
                 {
                     "3dm" => "https://mod.3dmgame.com/stardewvalley/133", "smallfire" => "https://svmbbs.smallfire.cn/",
                     "nexus" => "https://www.nexusmods.com/stardewvalley",
-                    "esous" => "https://esous.cn/", "gog" => "https://www.gog.com/en/game/stardew_valley",
+                    "esous" => "https://esous.cn/",
                     _ => throw new ArgumentException("未知社区。")
                 };
                 if (payload.Value<string>("id") is { Length: > 0 } communityId && payload.Value<string>("kind") is "3dm" or "smallfire")
                     communityUrl = (await communities.GetDetailAsync(payload.Value<string>("kind")!, communityId, ct)).SourceUrl;
-                if (payload.Value<string>("kind") == "gog") OpenUrl(communityUrl);
-                else await OpenCommunityLink(communityUrl, payload.Value<bool>("install"));
+                await OpenCommunityLink(communityUrl, payload.Value<bool>("install"));
                 return true;
             case "openContentSource":
                 var catalog = lastCatalog ?? await contentService.GetCatalogAsync(true);
@@ -409,14 +527,27 @@ public sealed class LauncherWindow : Window
 
     private bool IsRunning()
     {
-        try { return game is not null && !game.HasExited; }
-        catch (InvalidOperationException) { return false; }
+        lock (playtimeObservation)
+        {
+            var current = game;
+            try { return current is not null && !current.HasExited; }
+            catch (InvalidOperationException) { return false; }
+        }
     }
 
-    private StardewService ActiveGame() => contentService.GetState().Offline ? offlineGame : service;
-    private ModTroubleshootingService ActiveModState() => contentService.GetState().Offline ? offlineModState : normalModState;
-    private Task<object> Snapshot() => Task.Run<object>(() => new
+    private StardewService ActiveGame() => contentService.GetState().Offline ? offlineGame : launchProfiles.GetState().Platform == "xbox" ? xboxGame : service;
+    private ModTroubleshootingService ActiveModState() => contentService.GetState().Offline ? offlineModState : launchProfiles.GetState().Platform == "xbox" ? xboxModState : normalModState;
+    private void SetNetworkOffline(bool offline)
     {
+        contentService.SetOffline(offline);
+        smapiDownloads.Offline = communities.Offline = guides.Offline = guideImages.Offline = offline;
+        if (offline) pendingNexusInstalls.Clear();
+    }
+    private Task<object> Snapshot() => Task.Run<object>(() =>
+    {
+        ObservePlaytime();
+        return new
+        {
         installation = ActiveGame().GetInstallation(),
         settings = ActiveGame().Settings,
         mods = ActiveGame().GetMods(),
@@ -428,9 +559,181 @@ public sealed class LauncherWindow : Window
         home = home.GetState(calendarYear, calendarMonth), launchWarning,
         smapiDownload = smapiDownloads.GetState(),
         community = communities.GetState(),
+        guides = guides.GetState(),
+        launchProfile = launchProfiles.GetState(), launchProfiles = launchProfiles.GetProfiles(),
+        playtime = playtime.GetState(),
+        multiplayer = multiplayer.GetState(),
         operationNotice, installationResult,
         offlineGame = new { installation = offlineGame.GetInstallation(), settings = offlineGame.Settings, running = IsRunning() && runningGameDirectory == offlineGame.Settings.GameDirectory }
+        };
     });
+
+    private async Task LaunchSelectedGame(StardewService installation, string platform, bool useSmapi, CancellationToken ct)
+    {
+        var installed = installation.GetInstallation();
+        if (!installed.HasGame) throw new InvalidOperationException("请先为这个启动账号选择已安装的游戏目录。");
+        if (useSmapi && !installed.HasSmapi) throw new InvalidOperationException("当前目录尚未安装 SMAPI，请先安装或切换启动模式。");
+        using (var existing = FindGameProcess(installation.Settings.GameDirectory))
+            if (existing != null) throw new InvalidOperationException("当前目录的游戏已在运行。请先退出，再通过星芽启动以记录游玩时长。");
+        launchWarning = "";
+        Process started;
+        if (platform == "xbox")
+        {
+            installation.Settings.UseSmapi = useSmapi;
+            installation.SaveSettings();
+            var plan = await new XboxGameLaunchService().GetGameStartInfoAsync(installation.Settings.GameDirectory, ct);
+            var activated = false;
+            if (plan != null)
+            {
+                try { using var client = Process.Start(plan); activated = true; }
+                catch (System.ComponentModel.Win32Exception) { }
+            }
+            if (!activated)
+            {
+                using var client = Process.Start(LaunchProfileService.GetClientStartInfo("xbox"));
+                ReportLaunchProgress("请在 Xbox 客户端登录并启动星露谷，星芽会自动接管计时");
+            }
+            else ReportLaunchProgress("正在通过 Xbox 游戏入口启动，沿用客户端的游戏及 SMAPI 配置");
+            started = await WaitForGameProcess(installation.Settings.GameDirectory, "Xbox 尚未启动当前目录的游戏。请在 Xbox 客户端完成登录、确认游戏许可，并核对所选安装目录。", ct);
+        }
+        else if (platform == "steam" && !useSmapi)
+        {
+            if (!launchProfiles.GetState().CanOpenClient) throw new InvalidOperationException("未检测到 Steam 客户端，请安装并登录，或选择离线游玩目录。");
+            installation.Settings.UseSmapi = false;
+            installation.SaveSettings();
+            using (var client = Process.Start(LaunchProfileService.GetSteamGameStartInfo())) { }
+            ReportLaunchProgress("正在等待 Steam 启动星露谷，沿用库中的启动选项");
+            // The URI handler process is Steam, not the game. Only count a verified game process.
+            started = await WaitForGameProcess(installation.Settings.GameDirectory, "Steam 尚未启动游戏。请确认客户端已登录、拥有游戏，并选择 Steam 实际安装目录后重试。", ct);
+        }
+        else
+        {
+            if (platform == "steam" && useSmapi)
+            {
+                var clients = Process.GetProcessesByName("steam");
+                try
+                {
+                    if (clients.Length == 0)
+                    {
+                        using (var client = Process.Start(LaunchProfileService.GetClientStartInfo("steam"))) { }
+                        throw new InvalidOperationException("已打开 Steam，请登录后再次启动 SMAPI。Steam 成就与叠加层需按 SMAPI 官方指南配置库启动选项。");
+                    }
+                }
+                finally { foreach (var client in clients) client.Dispose(); }
+            }
+            started = await Task.Run(() => installation.Launch(useSmapi), ct);
+        }
+        lock (playtimeObservation)
+        {
+            game?.Dispose(); game = started; runningGameDirectory = installation.Settings.GameDirectory;
+            try { playtime.BeginSession(runningGameDirectory, platform, started.Id, new DateTimeOffset(started.StartTime.ToUniversalTime())); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            { launchWarning = "游戏已启动，但游玩时长暂未记录：" + ex.Message; }
+            WatchGameExit(started);
+        }
+    }
+
+    private void ReportLaunchProgress(string message)
+    {
+        ReportTaskProgress("launching", message);
+    }
+
+    private void ReportTaskProgress(string phase, string message)
+    {
+        if (!closing) browser.CoreWebView2.PostWebMessageAsJson(JsonConvert.SerializeObject(new { type = "progress", progress = new { phase, name = message } }, jsonSettings));
+    }
+
+    private static async Task<Process> WaitForGameProcess(string directory, string error, CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < 120; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var started = FindGameProcess(directory);
+            if (started != null) return started;
+            await Task.Delay(500, ct);
+        }
+        throw new InvalidOperationException(error);
+    }
+
+    private void RecoverPlaytime()
+    {
+        var active = playtime.ActiveSession;
+        if (active == null) return;
+        try
+        {
+            var candidate = Process.GetProcessById(active.Pid);
+            if (!candidate.HasExited && candidate.StartTime.ToUniversalTime() == active.ProcessStartUtc.UtcDateTime && IsGameProcess(candidate, active.GameDirectory))
+            {
+                lock (playtimeObservation)
+                {
+                    game = candidate; runningGameDirectory = active.GameDirectory;
+                    playtime.Checkpoint(true); WatchGameExit(candidate);
+                }
+                return;
+            }
+            candidate.Dispose();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException) { }
+        try { playtime.Checkpoint(false); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { launchWarning = "游玩记录暂时无法保存：" + ex.Message; }
+    }
+
+    private void WatchGameExit(Process process)
+    {
+        process.Exited += (_, _) => { if (!closing) Dispatcher.BeginInvoke(() => ObservePlaytime()); };
+        try { process.EnableRaisingEvents = true; }
+        catch (InvalidOperationException) { ObservePlaytime(); }
+    }
+
+    private void ObservePlaytime()
+    {
+        lock (playtimeObservation)
+        {
+            if (game == null) return;
+            try
+            {
+                var tracked = playtime.ActiveSession;
+                if (tracked == null) return;
+                if (tracked.Pid != game.Id || tracked.ProcessStartUtc.UtcDateTime != game.StartTime.ToUniversalTime())
+                    throw new InvalidOperationException("游戏进程与计时记录不匹配，已暂停计时。");
+                if (!game.HasExited) playtime.Checkpoint(true);
+                else
+                {
+                    playtime.FinishSession(new DateTimeOffset(game.ExitTime.ToUniversalTime()));
+                    game.Dispose(); game = null;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            { launchWarning = "游玩记录暂时无法更新：" + ex.Message; }
+        }
+    }
+
+    private static Process? FindGameProcess(string directory)
+    {
+        foreach (var name in new[] { "Stardew Valley", "StardewValley", "StardewModdingAPI" })
+        {
+            var candidates = Process.GetProcessesByName(name);
+            Process? match = null;
+            foreach (var candidate in candidates)
+            {
+                if (match == null && IsGameProcess(candidate, directory)) match = candidate;
+                else candidate.Dispose();
+            }
+            if (match != null) return match;
+        }
+        return null;
+    }
+
+    private static bool IsGameProcess(Process candidate, string directory)
+    {
+        try
+        {
+            var executable = candidate.MainModule?.FileName;
+            return !candidate.HasExited && executable != null && new[] { "Stardew Valley.exe", "StardewValley.exe", "StardewModdingAPI.exe" }.Contains(Path.GetFileName(executable), StringComparer.OrdinalIgnoreCase)
+                && string.Equals(Path.GetDirectoryName(Path.GetFullPath(executable)), Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return false; }
+    }
 
     private void OpenFolder(string kind)
     {
@@ -459,7 +762,7 @@ public sealed class LauncherWindow : Window
             if (i == 49) throw new InvalidOperationException("界面没有完成初始化。");
             await Task.Delay(200);
         }
-        foreach (var page in new[] { "home", "mods", "downloads", "offline", "saves", "logs", "settings", "appearance", "about" })
+        foreach (var page in new[] { "home", "mods", "downloads", "guides", "multiplayer", "offline", "saves", "logs", "settings", "appearance", "about" })
         {
             await browser.CoreWebView2.ExecuteScriptAsync($"window.app.showPage('{page}')");
             await Task.Delay(300);
@@ -479,7 +782,7 @@ public sealed class LauncherWindow : Window
         await Task.Delay(300);
         if (WindowState != WindowState.Normal) throw new InvalidOperationException("窗口还原检查未通过。");
         await File.WriteAllTextAsync(Path.Combine(directory, "window-result.json"), "{\"maximize\":true,\"restore\":true,\"taskbarPreserved\":true}");
-        await File.WriteAllTextAsync(Path.Combine(directory, "passed.txt"), "Nine StarSprout pages rendered successfully; no games, downloads or external API calls made.");
+        await File.WriteAllTextAsync(Path.Combine(directory, "passed.txt"), "Eleven StarSprout pages rendered successfully; no games, downloads or external API calls made.");
         Close();
     }
 
@@ -529,10 +832,9 @@ public sealed class LauncherWindow : Window
     private static void OpenUrl(string url) => Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     private void RecordLaunchDay(string? accent)
     {
-        launchWarning = "";
         try { home.RecordSuccessfulLaunch(accent ?? appearance.GetSettings().Accent); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
-        { launchWarning = "游戏已启动，但启动日历未保存：" + ex.Message; }
+        { launchWarning += (launchWarning.Length > 0 ? "\n" : "") + "游戏已启动，但启动日历未保存：" + ex.Message; }
     }
     private void SetDownloadNotice(DownloadResult result)
     {
@@ -555,7 +857,7 @@ public sealed class LauncherWindow : Window
     }
     private static string AppData()
     {
-        var args = Environment.GetCommandLineArgs(); var check = Array.IndexOf(args, "--appearance-test");
+        var args = Environment.GetCommandLineArgs(); var check = Array.FindIndex(args, value => value is "--appearance-test" or "--guide-test");
         return check >= 0 && check + 1 < args.Length ? Path.Combine(Path.GetFullPath(args[check + 1]), "isolated-data") : Path.Combine(AppRoot(), "StarSproutData");
     }
 }

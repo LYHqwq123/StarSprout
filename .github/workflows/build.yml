@@ -19,6 +19,23 @@ jobs:
           node-version: '22'
       - name: Check interface
         run: node StarSprout/verification/frontend-checks.cjs
+      - name: Check guide adapter and image cache
+        shell: pwsh
+        run: |
+          dotnet run --project StarSprout/verification/GuideChecks/GuideChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project StarSprout/verification/GuideImageChecks/GuideImageChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project StarSprout/verification/PlaytimeChecks/PlaytimeChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project StarSprout/verification/LaunchProfileChecks/LaunchProfileChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project StarSprout/verification/XboxLaunchChecks/XboxLaunchChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project StarSprout/verification/MultiplayerCoreChecks/MultiplayerCoreChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet run --project StarSprout/verification/MultiplayerChecks/MultiplayerChecks.csproj -c Release -p:NuGetAudit=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build release packages
         shell: pwsh
         run: ./StarSprout/tools/Build-Release.ps1

@@ -357,8 +357,8 @@ public sealed class NexusService : IDisposable
     private static void AddApplicationHeaders(HttpRequestMessage request)
     {
         request.Headers.Add("Application-Name", "StarSprout");
-        request.Headers.Add("Application-Version", "0.4.2");
-        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.2");
+        request.Headers.Add("Application-Version", "0.4.3");
+        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.3");
     }
 
     private async Task<JToken> SendApiRequest(HttpRequestMessage request, CancellationToken ct)

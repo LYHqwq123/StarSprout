@@ -62,7 +62,8 @@ try {
             $checks = Join-Path $destination 'verification'
             New-Item -ItemType Directory -Path $checks | Out-Null
             Copy-Item -LiteralPath (Join-Path $origin 'verification\frontend-checks.cjs') -Destination $checks
-            foreach ($suite in @('AnalysisChecks','ContentChecks','NexusChecks','AppearanceChecks','ModStateChecks','CommunityChecks','InstallChecks','HomeChecks','SmapiChecks')) {
+            Copy-Item -LiteralPath (Join-Path $origin 'verification\easytier-local-udp.ps1') -Destination $checks
+            foreach ($suite in @('AnalysisChecks','ContentChecks','NexusChecks','AppearanceChecks','ModStateChecks','CommunityChecks','InstallChecks','HomeChecks','SmapiChecks','GuideChecks','GuideImageChecks','PlaytimeChecks','LaunchProfileChecks','XboxLaunchChecks','MultiplayerChecks','MultiplayerCoreChecks')) {
                 if (-not (Test-Path -LiteralPath (Join-Path $origin "verification\$suite"))) { continue }
                 $suiteTarget = Join-Path $checks $suite
                 New-Item -ItemType Directory -Path $suiteTarget | Out-Null
