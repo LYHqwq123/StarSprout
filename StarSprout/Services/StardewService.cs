@@ -552,24 +552,36 @@ public sealed class StardewService
             EnsureWithin(source, modsRoot); EnsureNoLinks(source);
             var mod = GetMods().SingleOrDefault(m => m.DirectoryPath.Equals(source, StringComparison.OrdinalIgnoreCase))
                 ?? throw new ArgumentException("此目录不是当前游戏列表中的 Mod，请刷新后重试。");
-            var removedRoot = Path.Combine(settingsDirectory, "RemovedMods");
-            if (IsWithin(removedRoot, modsRoot, true)) throw new InvalidOperationException("删除备份目录不能位于 Mods 内。");
-            EnsureNoLinks(removedRoot);
-            var receipt = Path.Combine(removedRoot, DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N"));
-            var backup = Path.Combine(receipt, Path.GetFileName(source));
-            CopyModTreeVerified(source, backup, modsRoot, receipt);
-            File.WriteAllText(Path.Combine(receipt, "restore-info.json"), JsonConvert.SerializeObject(new
-            { mod.Name, mod.UniqueId, OriginalDirectory = source, BackupFolder = Path.GetFileName(backup), mod.Enabled }, Newtonsoft.Json.Formatting.Indented), new UTF8Encoding(false));
-            // Moving within the game volume removes the mod atomically; verified copies also work when launcher data is on another drive.
-            var retired = Path.Combine(gameRoot, ".starsprout-removed-" + Guid.NewGuid().ToString("N"));
-            EnsureWithin(retired, gameRoot); EnsureNoLinks(retired);
-            Directory.Move(source, retired);
-            var result = new ModRemovalResult { Name = mod.Name, UniqueId = mod.UniqueId, BackupDirectory = backup };
-            try { VerifyTree(retired); Directory.Delete(retired, true); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { result.CleanupPending = true; }
-            return result;
+            var files = VerifyTree(source);
+            // Validate every file before any deletion. A locked or read-only file must not produce a success result.
+            foreach (var file in files)
+                if ((File.GetAttributes(file) & FileAttributes.ReadOnly) != 0)
+                    throw new IOException("Mod 文件为只读，请先解除只读后重试：" + Path.GetFileName(file));
+            var leases = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+            try
+            {
+                foreach (var path in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories).Prepend(source).Concat(files))
+                {
+                    if (!path.Equals(source, StringComparison.OrdinalIgnoreCase)) EnsureWithin(path, source);
+                    EnsureNoLinks(path);
+                    var lease = RemovalCreateFile(path, 0x10000, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+                    if (lease.IsInvalid)
+                    {
+                        var error = System.Runtime.InteropServices.Marshal.GetLastWin32Error(); lease.Dispose();
+                        throw new IOException("Mod 文件被占用或无删除权限，请退出游戏后重试：" + Path.GetFileName(path), new System.ComponentModel.Win32Exception(error));
+                    }
+                    leases.Add(lease);
+                }
+            }
+            finally { foreach (var lease in leases) lease.Dispose(); }
+            EnsureWithin(source, modsRoot); EnsureNoLinks(source);
+            Directory.Delete(source, true);
+            return new ModRemovalResult { Name = mod.Name, UniqueId = mod.UniqueId };
         }
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle RemovalCreateFile(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
 
     private sealed class AutomaticInstallPlan
     {

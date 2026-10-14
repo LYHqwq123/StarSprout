@@ -263,10 +263,9 @@ public sealed class LauncherWindow : Window
             case "removeMod":
                 var removal = active.GetMods().FirstOrDefault(m => string.Equals(m.DirectoryPath, payload.Value<string>("directoryPath"), StringComparison.OrdinalIgnoreCase))
                     ?? throw new InvalidOperationException("Mod 已移动，请刷新列表。");
-                if (MessageBox.Show(this, $"删除 {removal.Name}？\n\n将从当前游戏移除该 Mod，并保存完整副本，方便恢复。\n{removal.DirectoryPath}", "删除 Mod", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return new { cancelled = true };
+                if (MessageBox.Show(this, $"永久删除 {removal.Name}？\n\n将直接删除该 Mod 的全部文件，不保留备份，也不移到回收站。此操作无法撤销。\n{removal.DirectoryPath}", "永久删除 Mod", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes) return new { cancelled = true };
                 var removed = await Task.Run(() => active.RemoveMod(removal.DirectoryPath), ct);
-                operationNotice = $"已删除 {removed.Name}，完整副本已保存。";
-                if (removed.CleanupPending) operationNotice += " 被占用的临时文件位于游戏目录，游戏不会加载它。";
+                operationNotice = $"已永久删除 {removed.Name}。";
                 return await Snapshot();
             case "setModsEnabled":
                 var selections = payload["directoryPaths"]?.ToObject<List<string>>() ?? new();
@@ -345,9 +344,17 @@ public sealed class LauncherWindow : Window
             case "saveNexusApplication": nexus.SaveApplicationId(payload.Value<string>("applicationId") ?? ""); return await Snapshot();
             case "startNexusLogin":
                 await nexus.StartSsoAsync(ct); return await Snapshot();
-            case "getNexusMod": return await nexus.GetModAsync(payload.Value<long>("modId"), ct);
+            case "nexusCatalog": return await nexus.GetCatalogAsync(payload.Value<string>("category") ?? "latest_added", payload.Value<string>("query"), payload.Value<int?>("page") ?? 1, ct);
+            case "getNexusMod":
+                var lookupId = payload.Value<long?>("modId") ?? 0;
+                if (payload.Value<string>("url") is { Length: > 0 } lookupUrl)
+                {
+                    var lookupPage = NexusService.NormalizeModPageUrl(lookupUrl);
+                    lookupId = long.Parse(System.Text.RegularExpressions.Regex.Match(lookupPage.AbsolutePath, @"/mods/(\d+)/?$").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+                }
+                return await nexus.GetModAsync(lookupId, ct);
             case "downloadNexus": SetDownloadNotice(await nexus.DownloadFileAsync(payload.Value<long>("modId"), payload.Value<long>("fileId"), payload.Value<bool>("install"), ct)); return await Snapshot();
-            case "registerNxm": NxmIntegration.Register(Path.Combine(AppRoot(), "StarSprout.exe")); return true;
+            case "registerNxm": NxmIntegration.Register(Path.Combine(AppRoot(), "StarSprout.exe")); return await Snapshot();
             case "openNexusLink":
                 await OpenCommunityLink(NexusService.NormalizeModPageUrl(payload.Value<string>("url") ?? "").AbsoluteUri, payload.Value<bool>("install")); return true;
             case "openNexusMod":
@@ -416,7 +423,7 @@ public sealed class LauncherWindow : Window
         saves = ActiveGame().GetSaves(),
         log = ActiveGame().GetRecentLog(),
         running = IsRunning() && runningGameDirectory == ActiveGame().Settings.GameDirectory,
-        content = contentService.GetState(), analysis = analysis.GetSettings(), nexus = nexus.GetState(),
+        content = contentService.GetState(), analysis = analysis.GetSettings(), nexus = nexus.GetState(), nxmRegistered = NxmIntegration.IsRegistered(Path.Combine(AppRoot(), "StarSprout.exe")),
         appearance = appearance.GetSettings(), window = new { maximized }, modTroubleshooting = ActiveModState().GetState(),
         home = home.GetState(calendarYear, calendarMonth), launchWarning,
         smapiDownload = smapiDownloads.GetState(),
@@ -436,7 +443,6 @@ public sealed class LauncherWindow : Window
             "logs" => Path.Combine(roaming, "ErrorLogs"),
             "backups" => Path.Combine(data, contentService.GetState().Offline ? "OfflineGame" : "Settings", "Backups"),
             "cache" => contentService.GetState().CacheDirectory,
-            "removedMods" => Path.Combine(data, contentService.GetState().Offline ? "OfflineGame" : "Settings", "RemovedMods"),
             _ => throw new ArgumentException("请先选择游戏文件夹。")
         };
         if (!Directory.Exists(folder)) throw new DirectoryNotFoundException("文件夹尚不存在。");

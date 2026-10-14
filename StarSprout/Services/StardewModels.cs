@@ -60,6 +60,4 @@ public sealed class ModRemovalResult
 {
     public string Name { get; set; } = "";
     public string UniqueId { get; set; } = "";
-    public string BackupDirectory { get; set; } = "";
-    public bool CleanupPending { get; set; }
 }

@@ -11,6 +11,10 @@ namespace StarSprout.Services;
 
 public sealed class NexusService : IDisposable
 {
+    // Nexus's official game ID, verified from its public game/mod API.
+    private const int StardewGameId = 1303;
+    private const int CatalogPageSize = 24;
+    private const string ModCardFields = "modId gameId name author summary version thumbnailUrl downloads endorsements updatedAt";
     private readonly string path;
     private readonly ContentService content;
     private readonly HttpClient http;
@@ -114,23 +118,118 @@ public sealed class NexusService : IDisposable
         throw new InvalidOperationException("N网登录没有完成。");
     }
 
+    /// <summary>Official v2 server-side name search and paged catalog; does not scrape a website.</summary>
+    public async Task<NexusCatalog> GetCatalogAsync(string category = "latest_added", string? query = null, int page = 1, CancellationToken ct = default)
+    {
+        EnsureOnline();
+        category = (category ?? "latest_added").Trim().ToLowerInvariant();
+        if (category is not ("latest_added" or "latest_updated" or "popular" or "trending")) throw new ArgumentException("未知的 Nexus 列表分类。");
+        if (page is < 1 or > 100000) throw new ArgumentException("Nexus 页码无效。");
+        query = (query ?? "").Trim();
+        if (query.Length > 120 || query.Any(char.IsControl)) throw new ArgumentException("搜索名称限 120 个字符，且不能包含控制字符。");
+        if (category == "trending" && query.Length == 0)
+        {
+            if (page != 1) throw new ArgumentException("Nexus 热门趋势榜不支持翻页。");
+            var response = await Api("games/stardewvalley/mods/trending.json", ct);
+            if (response is not JArray rows) throw new InvalidDataException("N网榜单响应格式不正确。");
+            var items = rows.OfType<JObject>().Select(row => MapRestMod(row)).Where(m => m.ModId > 0).Take(100).ToList();
+            return new() { Category = category, Page = 1, PageSize = items.Count, Total = items.Count, Items = items, Notice = "Nexus 官方热门趋势榜；此榜单不支持翻页。" };
+        }
+        var filter = new JObject { ["gameDomainName"] = new JObject { ["value"] = "stardewvalley", ["op"] = "EQUALS" } };
+        if (query.Length > 0)
+            filter["nameStemmed"] = new JObject { ["value"] = query, ["op"] = "MATCHES" };
+        var sortField = query.Length > 0 ? "relevance" : category switch { "latest_updated" => "updatedAt", "popular" => "downloads", _ => "createdAt" };
+        var variables = new JObject
+        {
+            ["filter"] = filter,
+            ["sort"] = new JArray(new JObject { [sortField] = new JObject { ["direction"] = "DESC" } }),
+            ["count"] = CatalogPageSize,
+            ["offset"] = checked((page - 1) * CatalogPageSize)
+        };
+        var data = await GraphApi("query StarSproutCatalog($filter: ModsFilter, $sort: [ModsSort!], $count: Int!, $offset: Int!) { mods(filter: $filter, sort: $sort, count: $count, offset: $offset) { totalCount nodes { " + ModCardFields + " } } }", variables, ct);
+        if (data["mods"] is not JObject result || result["nodes"] is not JArray nodes) throw new InvalidDataException("N网目录响应格式不正确。");
+        var cards = nodes.OfType<JObject>().Take(CatalogPageSize).Select(MapGraphMod).ToList();
+        var total = Math.Max(result.Value<long?>("totalCount") ?? 0, 0);
+        return new()
+        {
+            Category = category, Query = query, Page = page, PageSize = CatalogPageSize, Total = total,
+            HasMore = cards.Count > 0 && (long)(page - 1) * CatalogPageSize + nodes.Count < total,
+            Items = cards,
+            Notice = query.Length > 0 ? "Nexus 全站星露谷 Mod 名称搜索，结果由官方 API 返回。" : "Nexus 官方星露谷 Mod 目录。"
+        };
+    }
+
     public async Task<NexusMod> GetModAsync(long modId, CancellationToken ct = default)
     {
         Positive(modId);
+        if (!GetState().HasApiKey) return await GetPublicModAsync(modId, ct);
         var info = await Api($"games/stardewvalley/mods/{modId}.json", ct);
         var files = await Api($"games/stardewvalley/mods/{modId}/files.json", ct);
+        var result = MapRestMod((JObject)info, modId);
+        if (result.ModId != modId) throw new InvalidDataException("N网返回的 Mod 与所选资源不一致。");
+        var premium = GetState().IsPremium;
+        result.Files = (files["files"] as JArray ?? new()).OfType<JObject>().Select(f => MapFile(f, premium, false)).Where(f => f.FileId > 0).OrderBy(FileRank).ToList();
+        return result;
+    }
+
+    private async Task<NexusMod> GetPublicModAsync(long modId, CancellationToken ct)
+    {
+        var variables = new JObject { ["id"] = modId.ToString(System.Globalization.CultureInfo.InvariantCulture), ["fileModId"] = modId.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+        var data = await GraphApi("query StarSproutMod($id: String!, $fileModId: ID!) { mods(filter: { gameId: { value: \"1303\", op: EQUALS }, modId: { value: $id, op: EQUALS } }, count: 1) { nodes { " + ModCardFields + " description } } modFiles(modId: $fileModId, gameId: \"1303\") { fileId name version category sizeInBytes uri description } }", variables, ct);
+        if (data["mods"]?["nodes"] is not JArray nodes || nodes.Count == 0) throw new InvalidOperationException("N网没有找到这个星露谷 Mod，资源可能已隐藏或删除。");
+        var result = MapGraphMod((JObject)nodes[0]);
+        if (result.ModId != modId) throw new InvalidDataException("N网返回的 Mod 与所选资源不一致。");
+        if (data["modFiles"] is not JArray files) throw new InvalidDataException("N网文件列表响应格式不正确。");
+        result.Files = files.OfType<JObject>().Take(2000).Select(f => MapFile(f, false, true)).Where(f => f.FileId > 0).OrderBy(FileRank).ToList();
+        result.Notice = "公开详情与文件列表可直接浏览。Premium 账户连接 API Key 后可直接下载；普通账户需在官网授权管理器下载。";
+        return result;
+    }
+
+    private static NexusMod MapGraphMod(JObject info)
+    {
+        if (info.Value<int?>("gameId") != StardewGameId) throw new InvalidDataException("N网返回了其他游戏的资源。");
+        var id = info.Value<long?>("modId") ?? 0;
+        Positive(id);
         return new()
         {
-            ModId = modId, Name = info.Value<string>("name") ?? "", Author = info.Value<string>("author") ?? "", Summary = info.Value<string>("summary") ?? "",
-            Description = (info.Value<string>("description") ?? "")[..Math.Min((info.Value<string>("description") ?? "").Length, 32000)], Version = info.Value<string>("version") ?? "",
-            Files = (files["files"] as JArray ?? new()).OfType<JObject>().Select(f => new NexusFile
-            {
-                FileId = f.Value<long?>("file_id") ?? 0, Name = f.Value<string>("name") ?? "", Version = f.Value<string>("version") ?? "",
-                CategoryName = f.Value<string>("category_name") ?? "", Size = f.Value<long?>("size_in_bytes") ?? (f.Value<long?>("size") ?? 0) * 1024,
-                CanDownload = GetState().IsPremium && (f.Value<string>("file_name") ?? "").EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
-            }).Where(f => f.FileId > 0).ToList()
+            ModId = id, Name = Text(info, "name", 240), Author = Text(info, "author", 240), Summary = Text(info, "summary", 4000),
+            Description = Text(info, "description", 32000), Version = Text(info, "version", 120),
+            SourceUrl = $"https://www.nexusmods.com/stardewvalley/mods/{id}", PictureUrl = PublicImageUrl(Text(info, "thumbnailUrl", 2048)),
+            Downloads = Math.Max(info.Value<long?>("downloads") ?? 0, 0), Endorsements = Math.Max(info.Value<long?>("endorsements") ?? 0, 0), UpdatedAt = Text(info, "updatedAt", 80)
         };
     }
+
+    private static NexusMod MapRestMod(JObject info, long fallbackId = 0)
+    {
+        if (info.Value<int?>("game_id") is int game && game != StardewGameId) throw new InvalidDataException("N网返回了其他游戏的资源。");
+        var id = info.Value<long?>("mod_id") ?? fallbackId;
+        return new()
+        {
+            ModId = id, Name = Text(info, "name", 240), Author = Text(info, "author", 240), Summary = Text(info, "summary", 4000),
+            Description = Text(info, "description", 32000), Version = Text(info, "version", 120),
+            SourceUrl = $"https://www.nexusmods.com/stardewvalley/mods/{id}", PictureUrl = PublicImageUrl(Text(info, "picture_url", 2048)),
+            Downloads = Math.Max(info.Value<long?>("mod_downloads") ?? 0, 0), Endorsements = Math.Max(info.Value<long?>("endorsement_count") ?? 0, 0), UpdatedAt = Text(info, "updated_time", 80)
+        };
+    }
+
+    private static NexusFile MapFile(JObject file, bool premium, bool graph)
+    {
+        var category = Text(file, graph ? "category" : "category_name", 80);
+        var fileName = Text(file, graph ? "uri" : "file_name", 500);
+        var available = category.ToUpperInvariant() is not ("DELETED" or "ARCHIVED");
+        var zip = fileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+        return new()
+        {
+            FileId = file.Value<long?>(graph ? "fileId" : "file_id") ?? 0, Name = Text(file, "name", 240), Version = Text(file, "version", 120),
+            CategoryName = category, FileName = fileName, Description = Text(file, "description", 4000),
+            Size = Math.Max(file.Value<long?>(graph ? "sizeInBytes" : "size_in_bytes") ?? (file.Value<long?>("size") ?? 0) * 1024, 0),
+            IsZip = zip, Available = available, CanDownload = premium && zip && available
+        };
+    }
+    private static int FileRank(NexusFile file) => file.CategoryName.ToUpperInvariant() switch { "MAIN" => 0, "OPTIONAL" => 1, "PATCH" => 2, "MISCELLANEOUS" => 3, "OLD_VERSION" => 4, "ARCHIVED" => 5, "DELETED" => 6, _ => 3 };
+    private static string Text(JObject value, string field, int limit) { var text = value.Value<string>(field) ?? ""; return text[..Math.Min(text.Length, limit)]; }
+    private static string PublicImageUrl(string value) => Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == "https" && uri.IsDefaultPort && uri.UserInfo.Length == 0 &&
+        (uri.Host.Equals("staticdelivery.nexusmods.com", StringComparison.OrdinalIgnoreCase) || uri.Host.Equals("images.nexusmods.com", StringComparison.OrdinalIgnoreCase)) ? uri.AbsoluteUri : "";
 
     public Task<DownloadResult> DownloadFileAsync(long modId, long fileId, bool install, CancellationToken ct = default)
     {
@@ -235,9 +334,35 @@ public sealed class NexusService : IDisposable
         if (key.Length == 0) throw new InvalidOperationException("请先登录N网或保存 Personal API Key。");
         using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.nexusmods.com/v1/" + relative);
         request.Headers.Add("apikey", key);
+        AddApplicationHeaders(request);
+        return await SendApiRequest(request, ct);
+    }
+
+    private async Task<JObject> GraphApi(string query, JObject variables, CancellationToken ct)
+    {
+        EnsureOnline();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://api.nexusmods.com/v2/graphql");
+        var key = Key();
+        if (key.Length > 0) request.Headers.Add("apikey", key);
+        AddApplicationHeaders(request);
+        request.Content = new StringContent(JsonConvert.SerializeObject(new { query, variables }), Encoding.UTF8, "application/json");
+        var response = await SendApiRequest(request, ct);
+        // GraphQL can return HTTP 200 with semantic errors. Never treat partial data as a complete result.
+        if (response["errors"] is JArray errors && errors.Count > 0)
+            throw new InvalidOperationException("N网公开目录接口暂不可用，请稍后重试或在浏览器打开原站。");
+        if (response["data"] is not JObject data) throw new InvalidDataException("N网公开目录响应格式不正确。");
+        return data;
+    }
+
+    private static void AddApplicationHeaders(HttpRequestMessage request)
+    {
         request.Headers.Add("Application-Name", "StarSprout");
-        request.Headers.Add("Application-Version", "0.4.1");
-        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.1");
+        request.Headers.Add("Application-Version", "0.4.2");
+        request.Headers.UserAgent.ParseAdd("StarSprout/0.4.2");
+    }
+
+    private async Task<JToken> SendApiRequest(HttpRequestMessage request, CancellationToken ct)
+    {
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new InvalidOperationException("N网拒绝了访问，请检查 API Key、账号权限和下载授权。");
         if (response.StatusCode == (HttpStatusCode)429) throw new InvalidOperationException("N网请求次数达到限制，请稍后重试。");

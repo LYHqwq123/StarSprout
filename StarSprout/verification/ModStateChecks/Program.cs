@@ -113,28 +113,29 @@ try
     File.WriteAllText(Path.Combine(removeEnabled, "config.json"), "{\"keep\":true}");
     var removed = removal.Game.RemoveMod(removeEnabled);
     Check(!Directory.Exists(removeEnabled) && removal.Game.GetMods().Count == 1, "delete removes selected mod from installed scan");
-    Check(File.ReadAllText(Path.Combine(removed.BackupDirectory, "config.json")) == "{\"keep\":true}" && File.ReadAllText(Path.Combine(removed.BackupDirectory, "content.json")) == "{\"fixture\":true}", "deleted mod backup retains complete config and data");
-    Check(File.Exists(Path.Combine(Path.GetDirectoryName(removed.BackupDirectory)!, "restore-info.json")), "deletion retains recoverable original path and identity receipt");
+    Check(!Directory.Exists(Path.Combine(removal.Settings, "RemovedMods")) && !Directory.EnumerateDirectories(removal.Directory, ".starsprout-removed-*").Any(), "permanent deletion creates no backup or retired copy");
+    Check(Directory.Exists(removeDisabled) && File.Exists(Path.Combine(removeDisabled, "manifest.json")), "permanent deletion leaves unrelated disabled mod intact");
     Check(Reject(() => removal.Game.RemoveMod(removeEnabled)), "stale deletion cannot affect another mod");
     Check(Reject(() => removal.Game.RemoveMod(Path.Combine(removal.Directory, "Mods"))), "cannot delete Mods root");
     Check(Reject(() => removal.Game.RemoveMod(outside)) && Directory.Exists(outside), "cannot delete mod from another game");
     var groupMod = Add(removal.Game, Path.Combine("Group", "Nested"), "Removal.Nested");
     Check(Reject(() => removal.Game.RemoveMod(Path.GetDirectoryName(groupMod)!)) && Directory.Exists(groupMod), "cannot delete group parent not identified as a mod");
     var removedDisabled = removal.Game.RemoveMod(removeDisabled);
-    Check(!Directory.Exists(removeDisabled) && Path.GetFileName(removedDisabled.BackupDirectory) == ".Disabled", "disabled mod can be removed with original disabled name retained");
+    Check(!Directory.Exists(removeDisabled) && removedDisabled.UniqueId == "Removal.Disabled", "disabled mod is permanently removed without backup");
     var invalid = Add(removal.Game, "Invalid", "Removal.Invalid");
     File.WriteAllText(Path.Combine(invalid, "manifest.json"), "broken manifest");
     Check(removal.Game.RemoveMod(invalid).Name == "Invalid" && !Directory.Exists(invalid), "invalid manifest mod can be deleted safely for conflict cleanup");
     var lockFolder = Add(removal.Game, "Locked", "Removal.Locked");
     using (var held = new FileStream(Path.Combine(lockFolder, "content.json"), FileMode.Open, FileAccess.Read, FileShare.Read))
     {
-        try
-        {
-            var lockedRemoval = removal.Game.RemoveMod(lockFolder);
-            Check(!Directory.Exists(lockFolder) && File.Exists(Path.Combine(lockedRemoval.BackupDirectory, "content.json")), "locked cleanup still retains verified backup outside Mods");
-        }
-        catch (IOException) { Check(Directory.Exists(lockFolder) && File.Exists(Path.Combine(lockFolder, "manifest.json")), "failed locked removal preserves original directory"); }
+        Check(Reject(() => removal.Game.RemoveMod(lockFolder)) && File.Exists(Path.Combine(lockFolder, "manifest.json")) && File.Exists(Path.Combine(lockFolder, "content.json")), "locked file rejects deletion before any files are removed");
     }
+    var readOnly = Path.Combine(lockFolder, "content.json");
+    File.SetAttributes(readOnly, FileAttributes.ReadOnly);
+    Check(Reject(() => removal.Game.RemoveMod(lockFolder)) && File.Exists(Path.Combine(lockFolder, "manifest.json")), "read-only file rejects deletion before changing mod");
+    File.SetAttributes(readOnly, FileAttributes.Normal);
+    removal.Game.RemoveMod(lockFolder);
+    Check(!Directory.Exists(lockFolder) && !Directory.Exists(Path.Combine(removal.Settings, "RemovedMods")), "unlocked retry permanently deletes with no archive");
     Console.WriteLine($"PASS {passed} mod-state checks; isolated folders only, no game process started.");
 }
 finally

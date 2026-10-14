@@ -12,6 +12,16 @@ internal static class NxmIntegration
     internal static string MutexName => "Local\\StarSprout." + User;
     private static string PipeName => "StarSprout.Nxm." + User;
 
+    public static bool IsRegistered(string executable)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Classes\nxm\shell\open\command");
+            return string.Equals(key?.GetValue("") as string, "\"" + Path.GetFullPath(executable) + "\" \"%1\"", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException) { return false; }
+    }
+
     public static void Register(string executable)
     {
         executable = Path.GetFullPath(executable);
